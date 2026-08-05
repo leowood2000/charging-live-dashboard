@@ -12,13 +12,23 @@ python server.py
 
 也可以直接双击 **`启动仪表盘.bat`**：它会自动进入本目录、启动服务并打开浏览器；出错时窗口会停留并显示错误信息。
 
+**在其他电脑上使用（克隆仓库后）：**
+
+1. 安装 Python 3（本项目只用标准库，无第三方依赖）
+2. 安装/准备 adb：把 `adb.exe` 所在目录放到 `C:\adb`（脚本会自动探测），或加入 PATH；也可用 `--adb` 指定位置
+3. 手机开启“无线调试”（开发者选项），并执行 `adb connect <手机IP>:5555` 连上设备
+4. 双击 `启动仪表盘.bat`，或运行 `python server.py --open`
+
+不写死设备地址：服务会**自动使用 `adb devices` 里已连接的设备**；有多台设备或需要指定时再用 `--adb-host`/`--serial`。
+
 常用参数：
 
 ```powershell
-python server.py --adb-host 192.168.5.13:5555 --port 8765 --interval 3
+python server.py --adb-host 192.168.33.118:5555 --port 8765 --interval 3
+启动仪表盘.bat 192.168.33.118:5555
 ```
 
-- `--adb-host`：ADB over Wi-Fi 地址（默认 `192.168.33.118:5555`）
+- `--adb-host`：ADB over Wi-Fi 地址（默认空 = 自动识别已连接设备）
 - `--serial`：使用 `adb -s` 指定序列号
 - `--adb`：adb 可执行文件或所在目录，默认自动探测 `C:\adb\adb.exe`，找不到再找 PATH
 - `--interval`：采样/刷新间隔，默认 `3` 秒

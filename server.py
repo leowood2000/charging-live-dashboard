@@ -640,8 +640,8 @@ class DashboardServer(ThreadingHTTPServer):
 
 def main():
     parser = argparse.ArgumentParser(description="MCA charging real-time dashboard")
-    parser.add_argument("--adb-host", default="192.168.33.118:5555",
-                        help="ADB over Wi-Fi address (host:port)")
+    parser.add_argument("--adb-host", default="",
+                        help="ADB over Wi-Fi address host:port；留空则自动使用 adb devices 中已连接的设备")
     parser.add_argument("--serial", default=None, help="adb -s serial override")
     parser.add_argument("--adb", default="auto",
                         help="adb executable or folder (default: auto-detect C:\\adb or PATH)")
