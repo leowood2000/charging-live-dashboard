@@ -1,0 +1,881 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K80 Pro 无线充电实时仪表盘（MCA 深度档案）</title>
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #111a2e;
+    --panel-2: #16213a;
+    --border: #22304d;
+    --text: #e6edf7;
+    --muted: #8fa3bf;
+    --green: #34d399;
+    --cyan: #22d3ee;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --purple: #a78bfa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    padding: 18px 20px 44px;
+  }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .5px; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .status {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 5px 13px; font-size: 13px; background: var(--panel);
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.offline { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  .spacer { flex: 1; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .meta b { color: var(--text); font-weight: 500; }
+
+  .banner {
+    display: none;
+    border: 1px solid rgba(248,113,113,.45);
+    background: rgba(248,113,113,.08);
+    color: #fecaca;
+    padding: 10px 14px; border-radius: 10px; font-size: 13px; margin-bottom: 16px;
+  }
+  .banner.show { display: block; }
+
+  .section-title {
+    display: flex; align-items: center; gap: 10px;
+    margin: 26px 0 12px; font-size: 15px; font-weight: 600; color: var(--cyan);
+  }
+  .section-title::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  .section-title .badge {
+    font-size: 11px; font-weight: 400; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px;
+  }
+
+  .kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px; margin-bottom: 16px;
+  }
+  .kpi {
+    background: linear-gradient(160deg, rgba(34,211,238,.12), rgba(34,211,238,.02));
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 14px; min-height: 92px;
+  }
+  .kpi .label { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .kpi .value { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kpi .unit { font-size: 13px; color: var(--muted); margin-left: 3px; font-weight: 400; }
+  .kpi .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    grid-auto-flow: dense;
+    gap: 12px; margin-bottom: 16px;
+  }
+  .grid > .card { align-self: start; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px;
+  }
+  .card h2 {
+    margin: 0 0 10px; font-size: 14px; font-weight: 500;
+    color: var(--cyan); display: flex; align-items: center; gap: 8px;
+  }
+  .card h2 .tag {
+    font-size: 11px; color: var(--muted); font-weight: 400;
+    border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px;
+  }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 7px 14px; font-size: 13px; }
+  .kv .k { color: var(--muted); white-space: nowrap; }
+  .kv .v {
+    text-align: right; font-variant-numeric: tabular-nums;
+    word-break: break-all; white-space: pre-wrap;
+  }
+  .kv .v.bad { color: var(--red); }
+  .kv .v small { color: var(--muted); margin-left: 4px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+  .tiles.batt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tile {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; min-width: 0;
+  }
+  .tile .k { font-size: 11px; color: var(--muted); margin-bottom: 5px; word-break: break-all; }
+  .tile .k small { display: block; margin-top: 2px; }
+  .tile .v {
+    font-size: 15px; font-weight: 600; word-break: break-all;
+    font-variant-numeric: tabular-nums; line-height: 1.4;
+  }
+  .tile .v small { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 3px; }
+  .tile .v .empty { color: var(--muted); font-weight: 400; }
+  .tile .v .chips { justify-content: flex-start; }
+  .tile.wide { grid-column: 1 / -1; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+  .chip {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 4px 9px; font-size: 12px;
+  }
+  .chip b { font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .chip small { color: var(--muted); margin-left: 3px; }
+
+  .charts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px; margin-bottom: 16px;
+  }
+  .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+  .chart-card h3 {
+    margin: 0 0 6px; font-size: 12px; font-weight: 500; color: var(--muted);
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  .chart-card h3 span { color: var(--text); font-variant-numeric: tabular-nums; }
+  canvas { width: 100%; height: 120px; display: block; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+  td.time { color: var(--amber); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.mono { font-family: Consolas, "Courier New", monospace; font-size: 11px; color: #b9c7dd; word-break: break-all; }
+  .flow {
+    display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px;
+    font-size: 12px;
+  }
+  .flow .step {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 9px; min-width: 84px; text-align: center; line-height: 1.35;
+  }
+  .flow .step b { display: block; font-weight: 600; color: var(--text); font-size: 12px; }
+  .flow .step small { color: var(--muted); }
+  .flow .arrow { align-self: center; color: var(--cyan); font-weight: 700; }
+  .chain {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px;
+  }
+  .chain .node {
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px;
+    background: var(--panel-2); text-align: center; flex: 1 1 110px;
+  }
+  .chain .node b { display: block; font-size: 12px; }
+  .chain .node small { color: var(--muted); }
+  .chain .arrow { color: var(--cyan); font-weight: 700; }
+  .note { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 6px 0 0; }
+  .note b { color: var(--text); font-weight: 500; }
+
+  details {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 16px; margin-bottom: 12px;
+  }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  pre {
+    background: #0a101c; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px; overflow: auto; font-size: 11px; line-height: 1.5;
+    max-height: 340px; color: #b9c7dd; white-space: pre-wrap; word-break: break-all;
+  }
+  .mod-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+  .mod-grid h4 { margin: 0 0 5px; font-size: 12px; color: var(--amber); font-weight: 500; }
+  .mod-grid ul { margin: 0; padding-left: 16px; font-size: 11px; color: #b9c7dd; line-height: 1.7; }
+  .vote-block {
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+    margin-bottom: 10px; background: var(--panel-2);
+  }
+  .vote-block:last-child { margin-bottom: 0; }
+  .vote-head {
+    display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between;
+    font-size: 12px; margin-bottom: 6px;
+  }
+  .vote-head b { color: var(--cyan); }
+  .vote-head small { color: var(--muted); }
+  .vote-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .vote-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 999px; padding: 5px 11px; font-size: 12px;
+  }
+  .vote-chip .vc-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .vote-chip b { font-weight: 600; color: var(--muted); }
+  .vote-chip i { font-style: normal; font-variant-numeric: tabular-nums; color: var(--text); }
+  .vote-chip small { color: var(--muted); }
+  .vote-chip.on { border-color: rgba(52,211,153,.55); }
+  .vote-chip.on .vc-dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .vote-chip.on b { color: var(--text); }
+  .vote-chip.changed { border-color: rgba(251,191,36,.7); background: rgba(251,191,36,.08); }
+  .vote-chip.changed b { color: var(--amber); }
+  .vote-all { margin-top: 8px; }
+  .vote-all summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+  .vote-all .vote-chips { margin-top: 6px; }
+
+  @keyframes flashbg {
+    0% { background-color: rgba(52,211,153,.22); }
+    100% { background-color: transparent; }
+  }
+  .flash { animation: flashbg .8s ease-out; border-radius: 6px; }
+  .empty { color: var(--muted); }
+
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: 1fr; }
+    .charts { grid-template-columns: 1fr; }
+    th, td { font-size: 11px; padding: 5px 6px; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>K80 Pro 无线充电实时仪表盘</h1>
+      <div class="sub">Redmi K80 Pro（24122RKC7C / miro）· HyperOS · KernelSU root · 2026-08-03 实测档案</div>
+    </div>
+    <span class="status" id="statusBadge"><span class="dot" id="statusDot"></span><span id="statusText">连接中…</span></span>
+    <div class="spacer"></div>
+    <div class="meta">
+      设备：<b id="metaDevice">-</b> ｜ 采样：<b id="metaInterval">3</b>s ｜
+      最后更新：<b id="lastUpdate">-</b> ｜ 下次刷新：<b id="countdown">-</b>
+    </div>
+  </header>
+
+  <div class="banner" id="offlineBanner"></div>
+
+  <div class="section-title">实时数据 <span class="badge">每 3 秒刷新</span></div>
+  <section class="kpis" id="kpis" aria-label="关键指标"></section>
+  <section class="grid" id="groups" aria-label="充电实时数据"></section>
+  <section class="charts" id="charts" aria-label="实时曲线">
+    <div class="chart-card">
+      <h3>无线输入功率 (W) <span id="chart-input-power">-</span></h3>
+      <canvas id="cv-input-power" role="img" aria-label="无线输入功率曲线"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>电池电流 (mA) <span id="chart-batt-current">-</span></h3>
+      <canvas id="cv-batt-current" role="img" aria-label="电池电流曲线"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>无线输入电压 (V) <span id="chart-vout">-</span></h3>
+      <canvas id="cv-vout" role="img" aria-label="无线输入电压曲线"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>无线输入电流 (A) <span id="chart-iout">-</span></h3>
+      <canvas id="cv-iout" role="img" aria-label="无线输入电流曲线"></canvas>
+    </div>
+  </section>
+
+  <div class="section-title">电流投票实时表 <span class="badge">全部主题 · 3 秒刷新</span></div>
+  <section class="grid" id="voteTopics" aria-label="电流投票实时表"></section>
+
+  <div class="section-title">实时会话档案 <span class="badge">mca_log 最近会话 · 3 秒刷新</span></div>
+  <section class="grid" id="liveSessions" aria-label="实时会话档案"></section>
+
+  <div class="section-title">实测会话档案（历史快照） <span class="badge">2026-08-03 22:53–22:55</span></div>
+  <p class="note" style="margin:-6px 0 12px">以下为 2026-08-03 分析文档的历史数据；最新会话见上方“实时会话档案”。</p>
+  <section class="grid">
+    <div class="card">
+      <h2>私有协议握手时间线<span class="tag">内核日志</span></h2>
+      <div id="timeline"></div>
+    </div>
+    <div class="card">
+      <h2>功率实测与限流<span class="tag">30W 档</span></h2>
+      <div class="kv" id="powerMeasured"></div>
+      <p class="note">协商上限 <b>30W</b>，但实测因 <b>wireless_thermal_30w</b> 热控把电池充电电流限制在 <b>3400mA</b>，未跑满。</p>
+    </div>
+    <div class="card">
+      <h2>私有协议要点<span class="tag">结论摘要</span></h2>
+      <div class="kv" id="protocolFacts"></div>
+    </div>
+    <div class="card">
+      <h2>硬件链路<span class="tag">RX = SC96281</span></h2>
+      <div class="chain" id="hardwareChain"></div>
+      <p class="note">私有协议 = 标准 Qi 基线 + 私有认证 + 发射端型号识别 + 电压/频率/功率协商；FOD 参数表即发射端“白名单”。</p>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <h2>私有快充状态机<span class="tag">mca_quick_wireless</span></h2>
+      <div class="flow" id="stateMachine"></div>
+    </div>
+    <div class="card">
+      <h2>电流投票机制<span class="tag">历史快照 · mca_vote</span></h2>
+      <p class="note">各模块投票（限流取<b>最小值</b>，最严格者生效），由 <b>mca_vote</b> 汇总后下发硬件。实时投票表见上方“实时数据”区；下方为 2026-08-03 会话快照：</p>
+      <div id="voterTable"></div>
+      <p class="note">最终 <b>xm_wls_soc（SmartEndura）</b> 只投 375mA，无线输入被压到 <b>375mA</b>；`ichg_limit` 显示生效客户 <b>eff_client:wireless_thermal_30w 3400</b>。</p>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <h2>发射端 FOD 白名单<span class="tag">mca_sc96281_fod_data</span></h2>
+      <div class="chips" id="fodWhitelist" style="justify-content:flex-start"></div>
+      <p class="note">每个型号对应一套 FOD（异物检测）参数与功率策略，这就是私有协议必须“认出”发射端型号的原因。</p>
+    </div>
+    <div class="card">
+      <h2>架构与源码可得性<span class="tag">闭源还原</span></h2>
+      <div class="kv" id="sourceFacts"></div>
+      <p class="note">MCA 驱动源码未随 OSS 发布，以上结构由 <b>/proc/kallsyms 符号表 + 内核日志 + 设备树</b>还原，函数名真实存在。</p>
+    </div>
+  </section>
+
+  <details>
+    <summary>内核驱动模块清单（/sys/module，实际加载）</summary>
+    <div class="mod-grid" id="moduleList"></div>
+  </details>
+
+  <details>
+    <summary>关键 sysfs 节点与读取命令</summary>
+    <div id="sysfsTable"></div>
+    <pre id="commandBlock"></pre>
+  </details>
+
+  <details>
+    <summary>原始数据 JSON（所有节点完整输出）</summary>
+    <pre id="rawJson">等待数据…</pre>
+  </details>
+
+<script>
+"use strict";
+
+/* ================= 本次实测静态档案（来自深度分析文档） ================= */
+const SESSION = {
+  timeline: [
+    ["22:53:55", "充电板 power good", "wireless power_good_on，set chg current 4000"],
+    ["22:53:55", "私有协议尚未建立", "can't enable quick charge，force_vout_6v:0 epp:0 fc:0 qc_enable:0 pre_fastchg:0"],
+    ["22:54:00", "认证完成", "RX_INT_AUTHEN_FINISH，uuid_value = 0x09010907"],
+    ["22:54:00", "发射端识别", "POWER_SUPPLY_TX_ADAPTER=12（普通 Qi 板为 8），vout 从 6V 跳到 10.9V"],
+    ["22:54:04", "快充协商成功", "RX_INT_FAST_CHARGE，fast chg success:16，quick_charge_type=4，power_max=30"],
+    ["22:54:04", "电流限制下发", "set chg current 3400（client：wireless_thermal_30w）"],
+    ["22:54:11", "打开快充路径", "open path ibus 37 → 515 → 558 → 545 → 541"],
+    ["22:54:13–28", "电池电流爬升", "-1755 → -2333 → -2405 → -2476 → -2611 → -2694 → -2799 → -2923 → -2972 → -3079 mA"],
+    ["22:55:25", "CV 阈值步进", "vbatt_th decline 2mv，vbat_th=4068"],
+    ["22:55:35", "SmartEndura 介入", "smartchg_soc_limit_callback effective_result:1，电流压到 0（夜间充电保护）"],
+  ],
+  power: [
+    ["协商上限", "power_max = 30 W"],
+    ["接收端典型值", "vout ≈ 8.2V，iout ≈ 1.8–2.1A（约 15–17W）"],
+    ["电池端峰值", "约 4.0A × 4.0V ≈ 16W（受限流/温控影响）"],
+    ["限流来源", "buck eff_client:wireless_thermal_30w 3400"],
+    ["认证 UUID", "0x09010907"],
+    ["发射端型号", "TX_ADAPTER = 12（30W 档）"],
+  ],
+  facts: [
+    ["无线快充", "不是标准 Qi，而是小米私有协议（MCA 驱动）"],
+    ["接收端芯片", "SC96281（南芯，I2C 连接）"],
+    ["快充类型", "quick_charge_type = 4"],
+    ["快充成功标志", "wls_fc_flag = 16"],
+    ["无线芯片固件", "00.00.1e"],
+    ["电芯结构", "单电芯 6000mAh（金沙江硅碳电池，主/从双 BTB 接口）"],
+    ["FOD 参数节点", "mca_sc96281_fod_data / mca_nu1652_fod_data（双 RX 支持）"],
+    ["用户态 HAL", "vendor.xiaomi.hardware.micharge IMiCharge/default（running）"],
+    ["SmartEndura", "vendor.xiaomi.hardware.batteryantiaging（智能充电保护）"],
+  ],
+  chain: [
+    ["小米私有无线充电板", "TX"],
+    ["SC96281 无线接收芯片", "vout/vrect/iout/auth/fw"],
+    ["MCA 策略层", "basic/quick_wireless"],
+    ["Buck/Charge Pump", "mca_strategy_buckchg / platform_cp"],
+    ["单电芯电池", "O11U_6000mah_120w（双 BTB 大电流接口）"],
+  ],
+  stateMachine: [
+    ["Idle", "待机"],
+    ["检测无线板", "BPP/EPP 基线"],
+    ["私有认证", "AUTHEN_FINISH + UUID"],
+    ["识别 TX", "查表得功率档"],
+    ["电压爬升", "6V → 8/11V"],
+    ["FAST_CHARGE", "wls_fc_flag=16"],
+    ["打开 CP 路径", "ibus 爬升"],
+    ["电流爬升", "受热控/SoC限制"],
+    ["CV/充满", "SmartEndura 暂停"],
+  ],
+  voters: [
+    ["0.xm_wls", "1", "1300"],
+    ["3.xm_wls_soc", "1", "375"],
+    ["4.wireless_thermal_bpp", "0", "0"],
+    ["5.wireless_thermal_bppqc2", "0", "0"],
+    ["6.wireless_thermal_bppqc3", "0", "0"],
+    ["7.wireless_thermal_epp", "0", "0"],
+    ["8.wireless_qc", "0", "0"],
+    ["9.xm_wls_67w", "0", "0"],
+    ["10.xm_wls_qvalue", "0", "0"],
+    ["11.xm_wls_phone", "0", "0"],
+  ],
+  fod: ["白色立式 30W", "紫米 20W", "紫米 30W", "紫米 50W", "紫米车载 20W", "紫米车载 30W", "紫米车载 50W",
+        "移动电源无线 20W", "移动电源 30W", "Redmi 圆盘 30W", "M2 50W", "L2 50W", "K1 80W", "K8 100W",
+        "J1S 55W", "双线圈 30W", "磁吸 30W", "低感量 80W"],
+  modules: {
+    "平台抽象": ["mca_platform_base", "mca_platform_wireless_class", "mca_platform_cp_class",
+               "mca_platform_buckchg_class", "mca_platform_bc12_class", "mca_platform_loadsw_class",
+               "mca_platform_fg_ic_ops"],
+    "协议层": ["mca_protocol_class", "mca_protocol_pd_class", "mca_protocol_qc_class",
+             "mca_qcom_pd_protocol", "mca_pd_auth"],
+    "策略层": ["mca_strategy_class", "mca_basic_wireless", "mca_quick_wireless",
+             "mca_strategy_quickchg", "mca_strategy_buckchg", "mca_strategy_fg_class", "mca_strategy_fg_comp"],
+    "业务层": ["mca_business_battery_comp", "mca_business_charger_comp", "mca_business_misc_comp"],
+    "公共设施": ["mca_common", "mca_event", "mca_log", "mca_parse_dts", "mca_sysfs", "mca_workqueue",
+              "mca_charge_interface", "mca_charge_mievent", "mca_charger_thermal", "mca_smart_charge",
+              "mca_soc_limit", "mca_path_control", "mca_vbat_ovp_monitor", "mca_bmd",
+              "mca_connector_antiburn", "mca_hwid", "mca_lpd_detect", "mca_qcom_sysfs",
+              "mca_qcom_smem", "mca_qcom_subpmic_proxy", "mca_wireless_revchg"],
+    "芯片驱动": ["sc96281_comp（无线 RX）", "charger_partition", "charger_ulog_glink", "mca_adsp_glink"],
+  },
+  sysfs: [
+    ["soc:mca_business_charger/quick_charge_type", "私有快充类型（实测 4）"],
+    ["soc:mca_business_charger/real_type", "真实协议名（Unknown）"],
+    ["soc:mca_business_charger/power_max", "协商最大功率（30W）"],
+    ["soc:mca_strategy_basic_wireless_class/wls_debug", "实时无线参数 vout/vrect/iout"],
+    ["soc:mca_strategy_basic_wireless_class/wls_fc_flag", "快充成功标志（16）"],
+    ["soc:mca_charge_interface/ichg_limit", "电流投票结果（eff_client + mA）"],
+    ["soc:mca_charge_interface/charge_enable", "充电使能投票"],
+    ["soc:mca_platform_cp/ibus_total / ibus_delta", "电荷泵总线电流"],
+    ["soc:mca_bmd/btb_master_status", "主/从 BTB 状态（单电芯双接口）"],
+    ["soc:mca_charger_thermal/wireless_chg_curr", "无线热控限流"],
+    ["soc:mca_strategy_wireless_revchg_class/wireless_chip_fw", "无线芯片固件"],
+    ["/sys/class/power_supply/battery/uevent", "电池标准属性（电流/电压/SOC/温度/循环）"],
+  ],
+  source: [
+    ["官方内核分支", "MiCode/Xiaomi_Kernel_OpenSource bsp-miro-v-oss（公开）"],
+    ["MCA 驱动源码", "仓库内软链接指向 vendor/xiaomi/proprietary/mca（未公开）"],
+    ["K80 Pro 设备树", "xiaomi-smxxx0-devs/kernel_xiaomi_sm8750-devicetrees（公开）"],
+    ["驱动运行符号", "设备 /proc/kallsyms（需 root，本机可读）"],
+  ],
+  commands: `# 1) 连接设备（ADB over Wi-Fi，需 root）
+adb connect 192.168.5.13:5555
+
+# 2) 实时采样（每 2 秒一次，30 次）
+adb shell 'su -c "for i in $(seq 1 30); do
+  cat /sys/devices/platform/soc/soc:mca_business_charger/quick_charge_type
+  cat /sys/devices/platform/soc/soc:mca_business_charger/power_max
+  cat /sys/devices/platform/soc/soc:mca_strategy_basic_wireless_class/wls_debug
+  cat /sys/class/power_supply/battery/current_now
+  cat /sys/class/power_supply/battery/voltage_now
+  sleep 2
+done"'
+
+# 3) 抓握手日志（插拔充电板后立即执行）
+adb shell 'su -c "dmesg | grep -E \\"AUTHEN|FAST_CHARGE|TX_ADAPTER|open_path|wireless loop\\" | tail -n 200"'
+
+# 4) 符号表（驱动结构）
+adb shell 'su -c "grep mca_basic_wireless /proc/kallsyms"'
+adb shell 'su -c "grep sc96281 /proc/kallsyms"'`,
+};
+
+const CHIP_FACTS = [
+  ["无线接收芯片", "SC96281（南芯）"],
+  ["电量计", "bq27z561_master"],
+  ["主电荷泵", "sc8585_master"],
+  ["从电荷泵", "sc8585_slave（未启用）"],
+  ["快充管理", "小米澎湃 P3 + G1"],
+  ["充电框架", "MCA · mca_common / mca_vote"],
+  ["HAL 服务", "vendor.xiaomi.hardware.micharge"],
+  ["SmartEndura", "batteryantiaging 服务"],
+  ["FOD 节点", "SC96281 / NU1652 双参数表"],
+  ["电池", "O11U_6000mah_120w 单电芯"],
+  ["电芯接口", "主/从双 BTB"],
+  ["系统", "HyperOS · KernelSU root"],
+];
+
+/* ================= 实时渲染逻辑 ================= */
+const DEFAULT_POLL_MS = 3000;
+let pollMs = DEFAULT_POLL_MS;
+let lastFetchAt = 0;
+let timer = null;
+const lastValues = {};
+
+const KPI = [
+  { id: "input_power_w", label: "无线输入功率", unit: "W", digits: 2, hint: "vout × iout（典型 15–17W）" },
+  { id: "battery_power_w", label: "电池充电功率", unit: "W", digits: 2, hint: "|电池电流| × 电池电压" },
+  { id: "batt_current_ma", label: "电池电流", unit: "mA", digits: 0, hint: "充电为负值" },
+  { id: "batt_voltage_mv", label: "电池电压", unit: "mV", digits: 0, hint: "单电芯实测电压" },
+  { id: "capacity", label: "电量 SOC", unit: "%", digits: 1, hint: "battery uevent" },
+  { id: "temp_c", label: "电池温度", unit: "°C", digits: 1, hint: "battery uevent" },
+];
+
+const BATTERY_FIELDS = [
+  ["current_now", "CURRENT_NOW", v => (v / 1000).toFixed(1), "mA", "µA → mA", "电流"],
+  ["voltage_now", "VOLTAGE_NOW", v => (v / 1000).toFixed(1), "mV", "µV → mV", "电压"],
+  ["capacity", "CAPACITY", v => v, "%", "", "电量"],
+  ["temp", "TEMP", v => (v / 10).toFixed(1), "°C", "0.1°C → °C", "温度"],
+  ["status", "STATUS", v => v, "", "", "状态"],
+  ["health", "HEALTH", v => v, "", "", "健康"],
+  ["input_current_limit", "INPUT_CURRENT_LIMIT", v => v, "mA", "", "输入限流"],
+  ["cycle_count", "CYCLE_COUNT", v => v, "次", "", "循环次数"],
+  ["charge_full", "CHARGE_FULL", v => (v / 1000).toFixed(0), "mAh", "µAh → mAh", "满充容量"],
+  ["charge_counter", "CHARGE_COUNTER", v => (v / 1000).toFixed(0), "mAh", "µAh → mAh", "累计充电"],
+  ["time_to_full_now", "TIME_TO_FULL_NOW", v => v, "min", "", "充满剩余"],
+  ["voltage_max_design", "VOLTAGE_MAX_DESIGN", v => (v / 1000).toFixed(3), "V", "µV → V", "设计电压上限"],
+  ["technology", "TECHNOLOGY", v => v, "", "", "电池类型"],
+  ["model_name", "MODEL_NAME", v => v, "", "", "电池型号"],
+  ["present", "PRESENT", v => v, "", "", "电池在位"],
+  ["capacity_level", "CAPACITY_LEVEL", v => v, "", "", "电量等级"],
+];
+
+function $(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+function fmt(v, digits = 0) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "--";
+  return Number(v).toLocaleString("zh-CN", { maximumFractionDigits: digits, minimumFractionDigits: 0 });
+}
+function flash(id, value) {
+  const el = $(id);
+  if (!el) return;
+  if (lastValues[id] !== undefined && lastValues[id] !== value) {
+    el.classList.remove("flash");
+    void el.offsetWidth;
+    el.classList.add("flash");
+  }
+  lastValues[id] = value;
+}
+
+function setStatus(mode, text) {
+  $("statusDot").className = "dot " + (mode === "live" ? "live" : "offline");
+  $("statusText").textContent = text;
+}
+
+/* ---------- 静态档案渲染 ---------- */
+function renderStatic() {
+  $("timeline").innerHTML = `<table><thead><tr><th>时间</th><th>事件</th><th>日志 / 数值</th></tr></thead><tbody>` +
+    SESSION.timeline.map(r => `<tr><td class="time">${r[0]}</td><td>${esc(r[1])}</td><td class="mono">${esc(r[2])}</td></tr>`).join("") +
+    `</tbody></table>`;
+
+  $("powerMeasured").innerHTML = SESSION.power.map(r =>
+    `<div class="k">${esc(r[0])}</div><div class="v">${esc(r[1])}</div>`).join("");
+
+  $("protocolFacts").innerHTML = SESSION.facts.map(r =>
+    `<div class="k">${esc(r[0])}</div><div class="v">${esc(r[1])}</div>`).join("");
+
+  $("hardwareChain").innerHTML = SESSION.chain.map((n, i) =>
+    (i ? `<span class="arrow">▸</span>` : "") +
+    `<div class="node"><b>${esc(n[0])}</b><small>${esc(n[1])}</small></div>`).join("");
+
+  $("stateMachine").innerHTML = SESSION.stateMachine.map((s, i) =>
+    (i ? `<span class="arrow">→</span>` : "") +
+    `<div class="step"><b>${esc(s[0])}</b><small>${esc(s[1])}</small></div>`).join("");
+
+  $("voterTable").innerHTML = `<table><thead><tr><th>投票者</th><th>生效</th><th>值(mA)</th></tr></thead><tbody>` +
+    SESSION.voters.map(v => `<tr><td class="mono">${v[0]}</td><td>${v[1]}</td><td>${v[2]}</td></tr>`).join("") +
+    `</tbody></table>`;
+
+  $("fodWhitelist").innerHTML = SESSION.fod.map(f => `<span class="chip">${esc(f)}</span>`).join("");
+
+  $("sourceFacts").innerHTML = SESSION.source.map(r =>
+    `<div class="k">${esc(r[0])}</div><div class="v">${esc(r[1])}</div>`).join("");
+
+  $("moduleList").innerHTML = Object.entries(SESSION.modules).map(([g, list]) =>
+    `<div><h4>${esc(g)}</h4><ul>${list.map(m => `<li>${esc(m)}</li>`).join("")}</ul></div>`).join("");
+
+  $("sysfsTable").innerHTML = `<table><thead><tr><th>节点</th><th>含义</th></tr></thead><tbody>` +
+    SESSION.sysfs.map(r => `<tr><td class="mono">${esc(r[0])}</td><td>${esc(r[1])}</td></tr>`).join("") +
+    `</tbody></table>`;
+
+  $("commandBlock").textContent = SESSION.commands;
+}
+
+/* ---------- 实时渲染 ---------- */
+function renderOffline(data) {
+  setStatus("offline", "设备离线");
+  const banner = $("offlineBanner");
+  banner.classList.add("show");
+  banner.textContent = "采集失败：" + (data.error || "未知错误") +
+    "。当前不显示任何伪造数据，请检查 ADB 连接后页面会自动恢复。";
+  $("metaDevice").textContent = data.meta && data.meta.adb ? data.meta.adb : "-";
+  $("metaInterval").textContent = data.meta ? data.meta.interval : "3";
+  $("lastUpdate").textContent = data.iso || "-";
+
+  $("kpis").innerHTML = KPI.map(k =>
+    `<div class="kpi"><div class="label">${k.label}</div><div class="value empty">--</div></div>`).join("");
+  $("groups").innerHTML = "";
+  $("voteTopics").innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">离线</span></h2>` +
+    `<p class="note">设备离线，暂无投票数据。</p></div>`;
+  $("liveSessions").innerHTML = `<div class="card"><h2>实时会话档案<span class="tag">离线</span></h2>` +
+    `<p class="note">设备离线，暂无会话数据。</p></div>`;
+  ["chart-input-power", "chart-batt-current", "chart-vout", "chart-iout"]
+    .forEach(id => $(id).textContent = "-");
+  ["cv-input-power", "cv-batt-current", "cv-vout", "cv-iout"]
+    .forEach(id => clearCanvas($(id)));
+  $("rawJson").textContent = JSON.stringify(data, null, 2);
+}
+
+function renderKpis(d) {
+  const html = KPI.map(k => {
+    const v = d[k.id];
+    const has = v !== null && v !== undefined && !Number.isNaN(v);
+    return `<div class="kpi"><div class="label">${k.label}</div>` +
+      `<div class="value" id="kpi-${k.id}">${has ? fmt(v, k.digits) : "--"}</div>` +
+      `<span class="unit">${has ? k.unit : ""}</span>` +
+      `<div class="hint">${k.hint}</div></div>`;
+  }).join("");
+  $("kpis").innerHTML = html;
+  KPI.forEach(k => flash("kpi-" + k.id, d[k.id]));
+}
+
+function renderNode(node) {
+  let body = `<span class="empty">不可读</span>`;
+  if (node.ok && node.value) {
+    if (node.fmt === "wls") {
+      const m = {};
+      String(node.value).replace(/([A-Za-z_]+)=(-?\d+(?:\.\d+)?)/g, (_, k, v) => { m[k] = +v; return ""; });
+      const chips = [];
+      if (m.vout !== undefined) chips.push(`<span class="chip">vout<b>${m.vout}</b><small>mV</small></span>`);
+      if (m.vrect !== undefined) chips.push(`<span class="chip">vrect<b>${m.vrect}</b><small>mV</small></span>`);
+      if (m.iout !== undefined) chips.push(`<span class="chip">iout<b>${m.iout}</b><small>mA</small></span>`);
+      if (m.tx_adapter !== undefined) chips.push(`<span class="chip">TX<b>${m.tx_adapter}</b></span>`);
+      body = `<div class="chips">${chips.join("")}</div>`;
+    } else if (node.fmt === "ichg") {
+      body = `<span>${esc(node.value)}</span>`;
+    } else if (node.fmt === "num") {
+      const n = Number(node.value);
+      body = `<span class="${Number.isFinite(n) ? "" : "bad"}">${esc(node.value)}<small>${node.unit}</small></span>`;
+    } else {
+      body = `<span>${esc(node.value)}</span>`;
+    }
+  }
+  const wide = node.fmt === "wls" || node.fmt === "ichg" ? " wide" : "";
+  return `<div class="tile${wide}"><div class="k">${esc(node.label)}</div>` +
+    `<div class="v" data-node="${node.id}">${body}</div></div>`;
+}
+
+function renderGroups(d) {
+  const groups = {};
+  d.nodes.forEach(n => { (groups[n.group] ||= []).push(n); });
+  const cards = Object.entries(groups).map(([name, nodes]) => {
+    const tiles = nodes.map(renderNode).join("");
+    const extra = name === "芯片与系统"
+      ? CHIP_FACTS.map(f =>
+          `<div class="tile"><div class="k">${esc(f[0])}</div><div class="v">${esc(f[1])}</div></div>`).join("")
+      : "";
+    return `<div class="card"><h2>${esc(name)}<span class="tag">${nodes.length} 项</span></h2>` +
+      `<div class="tiles">${tiles}${extra}</div></div>`;
+  });
+
+  const battRows = BATTERY_FIELDS.map(([key, ukey, conv, unit, hint, label]) => {
+    const item = d.battery[key] || d.battery[ukey.toLowerCase()];
+    const has = item && item.ok && item.value !== "";
+    let v = `<span class="empty">不可读</span>`;
+    if (has) {
+      const num = Number(item.value);
+      const shown = Number.isFinite(num) ? conv(num) : item.value;
+      v = `<span>${esc(shown)}<small>${unit}</small></span>`;
+    }
+    return `<div class="tile"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
+      `<div class="v">${v}</div></div>`;
+  }).join("");
+  cards.push(`<div class="card"><h2>电池标准属性<span class="tag">battery uevent</span></h2>` +
+    `<div class="tiles batt">${battRows}</div></div>`);
+  $("groups").innerHTML = cards.join("");
+}
+
+function renderVoters(d) {
+  const el = $("voteTopics");
+  const topics = d.voters || {};
+  const keys = Object.keys(topics);
+  if (!keys.length) {
+    el.innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">最近日志</span></h2>` +
+      `<p class="note">日志中暂无投票表输出。</p></div>`;
+    return;
+  }
+  const order = ["wireless_buck_input", "buck_charge_curr", "chg_enable",
+                 "quick_chg_disable", "wls_quick_chg_disable"];
+  const sorted = order.filter(t => topics[t])
+    .concat(keys.filter(t => !order.includes(t)));
+  const cards = sorted.map(t => {
+    const b = topics[t];
+    const rows = b.rows || [];
+    const active = rows.filter(r => r.enable === 1).length;
+    const chips = rows.map(r => {
+      const changed = b.changed && b.changed.client === r.client;
+      const cls = `vote-chip ${r.enable ? "on" : "off"}${changed ? " changed" : ""}`;
+      const unit = b.unit || "";
+      return `<span class="${cls}" title="${esc(r.client)}：生效=${r.enable}，值=${r.value}${unit}">` +
+        `<span class="vc-dot"></span><b>${esc(r.client)}</b><i>${r.value}</i>` +
+        `${unit ? `<small>${unit}</small>` : ""}</span>`;
+    }).join("");
+    const changedText = b.changed
+      ? ` · 最近变动 ${esc(b.changed.client)} → ${b.changed.value}`
+      : "";
+    return `<div class="card"><h2>${esc(t)}<span class="tag">生效 ${active}/${rows.length}</span></h2>` +
+      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small></div>` +
+      `<div class="vote-chips">${chips}</div></div>`;
+  }).join("");
+  el.innerHTML = cards;
+}
+
+function renderCharts(d) {
+  const h = d.history || [];
+  const series = [
+    { id: "input_power_w", cv: "cv-input-power", label: "chart-input-power", color: "#22d3ee" },
+    { id: "batt_current_ma", cv: "cv-batt-current", label: "chart-batt-current", color: "#34d399" },
+    { id: "vout", cv: "cv-vout", label: "chart-vout", color: "#fbbf24", scale: v => v / 1000 },
+    { id: "iout", cv: "cv-iout", label: "chart-iout", color: "#a78bfa", scale: v => v / 1000 },
+  ];
+  series.forEach(s => {
+    const latest = d.derived ? d.derived[s.id] : null;
+    $(s.label).textContent = latest === null || latest === undefined ? "--" : fmt(s.scale ? s.scale(latest) : latest, s.scale ? 2 : 0);
+    const vals = h.map(x => x[s.id] === null || x[s.id] === undefined ? null : (s.scale ? s.scale(x[s.id]) : x[s.id]));
+    drawLine($(s.cv), vals, s.color, s.label.replace("chart-", ""));
+  });
+}
+
+function clearCanvas(cv) {
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cv.width, cv.height);
+}
+
+function drawLine(cv, values, color, name) {
+  clearCanvas(cv);
+  const valid = values.filter(v => v !== null && v !== undefined && Number.isFinite(v));
+  if (valid.length < 2) {
+    const ctx = cv.getContext("2d");
+    ctx.fillStyle = "#8fa3bf";
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("等待数据…", cv.width / 2, cv.height / 2);
+    return;
+  }
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = cv.clientWidth || 280;
+  const cssH = cv.clientHeight || 120;
+  if (cv.width !== cssW * dpr || cv.height !== cssH * dpr) {
+    cv.width = cssW * dpr;
+    cv.height = cssH * dpr;
+  }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const pad = { l: 34, r: 8, t: 8, b: 20 };
+  const w = cssW - pad.l - pad.r;
+  const h = cssH - pad.t - pad.b;
+  let min = Math.min(...valid), max = Math.max(...valid);
+  if (min === max) { min -= 1; max += 1; }
+  const span = max - min;
+  min -= span * 0.08; max += span * 0.08;
+
+  ctx.strokeStyle = "#22304d";
+  ctx.fillStyle = "#8fa3bf";
+  ctx.font = "10px sans-serif";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const y = pad.t + h - (i / 3) * h;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, y);
+    ctx.lineTo(pad.l + w, y);
+    ctx.stroke();
+    const val = min + (max - min) * (i / 3);
+    ctx.textAlign = "right";
+    ctx.fillText(val.toFixed(val >= 100 ? 0 : 1), pad.l - 4, y + 3);
+  }
+  ctx.textAlign = "left";
+  ctx.fillText(name, pad.l, cssH - 4);
+
+  const n = values.length;
+  const x = i => pad.l + (i / (n - 1)) * w;
+  const y = v => pad.t + h - ((v - min) / (max - min)) * h;
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  let started = false;
+  values.forEach((v, i) => {
+    if (v === null || v === undefined) { started = false; return; }
+    if (!started) { ctx.moveTo(x(i), y(v)); started = true; }
+    else ctx.lineTo(x(i), y(v));
+  });
+  ctx.stroke();
+
+  const lastIdx = values.length - 1;
+  const lv = values[lastIdx];
+  if (lv !== null && lv !== undefined) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x(lastIdx), y(lv), 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function renderSessions(d) {
+  const el = $("liveSessions");
+  const list = d.sessions || [];
+  if (!list.length) {
+    el.innerHTML = `<div class="card"><h2>实时会话档案<span class="tag">最近日志</span></h2>` +
+      `<p class="note">暂未检测到插拔/握手事件；把手机放上无线充电板后会自动生成会话时间线。</p></div>`;
+    return;
+  }
+  const cards = list.slice().reverse().map((s, i) => {
+    const meta = [
+      s.uuid ? `UUID ${s.uuid}` : null,
+      s.tx_adapter ? s.tx_adapter : null,
+      s.fc_flag !== null && s.fc_flag !== undefined ? `fast chg ${s.fc_flag}` : null,
+      s.peak_limit_ma !== null && s.peak_limit_ma !== undefined ? `峰值限流 ${s.peak_limit_ma}mA` : null,
+      s.final_limit_ma !== null && s.final_limit_ma !== undefined ? `当前限流 ${s.final_limit_ma}mA` : null,
+      s.opens ? `打开路径 ${s.opens} 次` : null,
+      s.smartendura ? "SmartEndura 介入" : null,
+    ].filter(Boolean);
+    const rows = (s.events || []).map(e =>
+      `<tr><td class="time">${esc(e.time)}</td><td>${esc(e.label)}</td>` +
+      `<td class="mono">${esc(e.detail || "-")}</td></tr>`).join("");
+    const status = s.ended ? "已结束" : "进行中";
+    return `<div class="card"><h2>会话 ${list.length - i}<span class="tag">${esc(s.start)} · ${status}</span></h2>` +
+      `<div class="chips" style="justify-content:flex-start;margin-bottom:10px">` +
+      `${meta.map(c => `<span class="chip">${esc(c)}</span>`).join("")}</div>` +
+      `<table><thead><tr><th>本地时间</th><th>事件</th><th>日志 / 数值</th></tr></thead>` +
+      `<tbody>${rows}</tbody></table></div>`;
+  }).join("");
+  el.innerHTML = cards;
+}
+
+function render(data) {
+  $("metaDevice").textContent = (data.meta && data.meta.adb) || "-";
+  $("metaInterval").textContent = data.meta ? data.meta.interval : "3";
+  $("lastUpdate").textContent = data.iso || "-";
+  $("rawJson").textContent = JSON.stringify(data, null, 2);
+  $("offlineBanner").classList.remove("show");
+
+  if (data.mode !== "live" || !data.connected) {
+    renderOffline(data);
+    return;
+  }
+  setStatus("live", "实时采集");
+  renderKpis(data.derived || {});
+  renderGroups(data);
+  renderVoters(data);
+  renderCharts(data);
+  renderSessions(data);
+}
+
+async function load() {
+  lastFetchAt = Date.now();
+  try {
+    const res = await fetch("/api/data", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    if (data.meta && data.meta.interval) pollMs = Math.max(1000, data.meta.interval * 1000);
+    render(data);
+  } catch (err) {
+    console.error("load failed:", err);
+    setStatus("offline", "服务连接失败");
+    const banner = $("offlineBanner");
+    banner.classList.add("show");
+    banner.textContent = "无法获取数据：" + err.message + "。请确认后端 server.py 正在运行。";
+  } finally {
+    timer = setTimeout(load, pollMs);
+  }
+}
+
+setInterval(() => {
+  if (!lastFetchAt) return;
+  const remain = Math.max(0, (lastFetchAt + pollMs - Date.now()) / 1000);
+  $("countdown").textContent = remain.toFixed(1) + "s";
+}, 250);
+
+renderStatic();
+load();
+</script>
+</body>
+</html>
