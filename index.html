@@ -475,6 +475,35 @@ function renderVoters(d) {
       `<p class="note">日志中暂无投票表输出。</p></div>`;
     return;
   }
+
+  const effectiveOf = b => {
+    if (!b) return null;
+    if (b.result) return { client: b.result.client, value: b.result.value, calc: false };
+    if (b.unit === "mA") {
+      const enabled = (b.rows || []).filter(r => r.enable === 1);
+      if (enabled.length) {
+        const min = enabled.reduce((a, b) => b.value < a.value ? b : a);
+        return { client: min.client, value: min.value, calc: true };
+      }
+    }
+    return null;
+  };
+  const summary = [];
+  const addSummary = (label, eff, fmt) => {
+    if (!eff) return;
+    summary.push(`<span class="chip" title="${eff.calc ? "驱动未输出 effective 行，按启用投票取最小值推算" : "驱动 effective 仲裁结果"}">` +
+      `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : ""}</small></span>`);
+  };
+  addSummary("无线输入限流", effectiveOf(topics.wireless_buck_input), v => `${v}mA`);
+  addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+  addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
+  addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
+  addSummary("无线快充禁用", effectiveOf(topics.wls_quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
+  const summaryCard = summary.length
+    ? `<div class="card"><h2>总仲裁结果<span class="tag">汇总</span></h2>` +
+      `<div class="chips" style="justify-content:flex-start">${summary.join("")}</div></div>`
+    : "";
+
   const order = ["wireless_buck_input", "buck_charge_curr", "chg_enable",
                  "quick_chg_disable", "wls_quick_chg_disable"];
   const sorted = order.filter(t => topics[t])
@@ -508,7 +537,7 @@ function renderVoters(d) {
       `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}</div>` +
       `<div class="vote-chips">${chips}</div></div>`;
   }).join("");
-  el.innerHTML = cards;
+  el.innerHTML = summaryCard + cards;
 }
 
 function renderCharts(d) {
