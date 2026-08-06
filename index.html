@@ -499,6 +499,9 @@ function renderVoters(d) {
   addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
   addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
   addSummary("无线快充禁用", effectiveOf(topics.wls_quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
+  if (d.derived && d.derived.temp_c !== null && d.derived.temp_c !== undefined) {
+    summary.push(`<span class="chip">电池温度<b>${fmt(d.derived.temp_c, 1)}</b><small>°C</small></span>`);
+  }
   const summaryCard = summary.length
     ? `<div class="card"><h2>总仲裁结果<span class="tag">汇总</span></h2>` +
       `<div class="chips" style="justify-content:flex-start">${summary.join("")}</div></div>`
