@@ -279,13 +279,15 @@
     </div>
   </section>
 
-  <div class="section-title">电流投票实时表 <span class="badge">全部主题 · 3 秒刷新</span></div>
+  <div class="section-title">电流投票实时表 <span class="badge">全部主题 · 3 秒刷新</span>
+    <span id="logsStaleBadge" class="badge" style="display:none;color:var(--amber);border-color:rgba(251,191,36,.5)">日志读取失败 · 显示上次成功数据</span>
+  </div>
   <section class="grid" id="voteTopics" aria-label="电流投票实时表"></section>
 
   <div class="section-title">实时会话档案 <span class="badge">mca_log 最近会话 · 3 秒刷新</span></div>
   <section class="grid" id="liveSessions" aria-label="实时会话档案"></section>
 
-  <details>
+  <details id="rawDetails">
     <summary>原始数据 JSON（所有节点完整输出）</summary>
     <pre id="rawJson">等待数据…</pre>
   </details>
@@ -314,6 +316,10 @@ let pollMs = DEFAULT_POLL_MS;
 let lastFetchAt = 0;
 let timer = null;
 const lastValues = {};
+let lastGroupsJson = "";
+let lastVotersJson = "";
+let lastSessionsJson = "";
+let lastGroupsStruct = "";
 
 const KPI = [
   { id: "input_power_w", label: "无线输入功率", unit: "W", digits: 2, hint: "vout × iout（典型 15–17W）" },
@@ -408,6 +414,10 @@ function renderKpis(d) {
 }
 
 function renderNode(node) {
+  return renderNodeTile(node);
+}
+
+function renderNodeBody(node) {
   let body = `<span class="empty">不可读</span>`;
   if (node.ok && node.value) {
     if (node.fmt === "wls") {
@@ -431,12 +441,55 @@ function renderNode(node) {
       body = `<span>${esc(node.value)}</span>`;
     }
   }
+  return body;
+}
+
+function renderNodeTile(node) {
   const wide = node.fmt === "wls" || node.fmt === "ichg" ? " wide" : "";
   return `<div class="tile${wide}"><div class="k">${esc(node.label)}</div>` +
-    `<div class="v" data-node="${node.id}">${body}</div></div>`;
+    `<div class="v" data-node="${node.id}">${renderNodeBody(node)}</div></div>`;
 }
 
 function renderGroups(d) {
+  const struct = JSON.stringify({
+    groups: d.nodes.map(n => [n.group, n.id, n.fmt, n.label]),
+    batt: BATTERY_FIELDS.map(f => f[0]),
+  });
+  if (struct !== lastGroupsStruct) {
+    lastGroupsStruct = struct;
+    buildGroups(d);
+  } else {
+    d.nodes.forEach(n => {
+      const el = document.querySelector(`[data-node="${n.id}"]`);
+      if (el) el.innerHTML = renderNodeBody(n);
+    });
+    BATTERY_FIELDS.forEach(([key]) => {
+      const el = document.querySelector(`[data-batt="${key}"]`);
+      if (!el) return;
+      const item = d.battery[key] || d.battery[key.toUpperCase()];
+      const has = item && item.ok && item.value !== "";
+      let v = `<span class="empty">不可读</span>`;
+      if (has) {
+        const num = Number(item.value);
+        const shown = Number.isFinite(num) ? batteryConv(key, item.value) : item.value;
+        v = `<span>${esc(shown)}<small>${batteryUnit(key)}</small></span>`;
+      }
+      el.innerHTML = v;
+    });
+  }
+}
+
+function batteryConv(key, raw) {
+  const f = BATTERY_FIELDS.find(x => x[0] === key);
+  return f ? f[2](raw) : raw;
+}
+
+function batteryUnit(key) {
+  const f = BATTERY_FIELDS.find(x => x[0] === key);
+  return f ? f[3] : "";
+}
+
+function buildGroups(d) {
   const groups = {};
   d.nodes.forEach(n => { (groups[n.group] ||= []).push(n); });
   const cards = Object.entries(groups).map(([name, nodes]) => {
@@ -459,7 +512,7 @@ function renderGroups(d) {
       v = `<span>${esc(shown)}<small>${unit}</small></span>`;
     }
     return `<div class="tile"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
-      `<div class="v">${v}</div></div>`;
+      `<div class="v" data-batt="${key}">${v}</div></div>`;
   }).join("");
   cards.push(`<div class="card"><h2>电池标准属性<span class="tag">battery uevent</span></h2>` +
     `<div class="tiles batt">${battRows}</div></div>`);
@@ -687,19 +740,41 @@ function render(data) {
   $("metaDevice").textContent = (data.meta && data.meta.adb) || "-";
   $("metaInterval").textContent = data.meta ? data.meta.interval : "3";
   $("lastUpdate").textContent = data.iso || "-";
-  $("rawJson").textContent = JSON.stringify(data, null, 2);
+  const rawDetails = document.querySelector("#rawDetails");
+  if (!rawDetails || rawDetails.open) {
+    $("rawJson").textContent = JSON.stringify(data, null, 2);
+  }
   $("offlineBanner").classList.remove("show");
 
   if (data.mode !== "live" || !data.connected) {
+    resetRenderSignatures();
     renderOffline(data);
     return;
   }
   setStatus("live", "实时采集");
   renderKpis(data.derived || {});
+  const logsStale = data.meta && data.meta.logs_stale;
+  const staleEl = $("logsStaleBadge");
+  if (staleEl) staleEl.style.display = logsStale ? "" : "none";
   renderGroups(data);
-  renderVoters(data);
+  const votersJson = JSON.stringify(data.voters || {});
+  if (votersJson !== lastVotersJson) {
+    lastVotersJson = votersJson;
+    renderVoters(data);
+  }
   renderCharts(data);
-  renderSessions(data);
+  const sessionsJson = JSON.stringify(data.sessions || []);
+  if (sessionsJson !== lastSessionsJson) {
+    lastSessionsJson = sessionsJson;
+    renderSessions(data);
+  }
+}
+
+function resetRenderSignatures() {
+  lastGroupsJson = "";
+  lastVotersJson = "";
+  lastSessionsJson = "";
+  lastGroupsStruct = "";
 }
 
 async function load() {

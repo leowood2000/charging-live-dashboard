@@ -568,6 +568,8 @@ class Sampler(threading.Thread):
         self.history: deque[dict] = deque(maxlen=180)
         self.lock = threading.Lock()
         self.snapshot: dict = self._build_error_snapshot("initializing")
+        self.logs_stale = False
+        self.logs_updated_at = time.time() * 1000
         self._stop = threading.Event()
 
     def run(self):
@@ -619,6 +621,14 @@ class Sampler(threading.Thread):
         if icl is not None and "wireless_buck_input" in parsed["voters"]:
             parsed["voters"]["wireless_buck_input"]["icl"] = icl
         parsed["thermal"] = parse_thermal_dump(self.adb.read_thermal_dump())
+        self.logs_stale = not bool(session_log.strip())
+        self.logs_updated_at = time.time() * 1000
+        parsed["meta"].update({
+            "fast_interval": 3,
+            "logs_interval": self.interval,
+            "logs_updated_at": self.logs_updated_at,
+            "logs_stale": self.logs_stale,
+        })
 
         with self.lock:
             sample = {
