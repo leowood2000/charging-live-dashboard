@@ -15,6 +15,24 @@
 - **桌面端固定栅格**：1320px 居中，KPI 三列、实时数据两列、电池标准属性整行四列、曲线两列、总仲裁整行、会话单列；900px/560px 以下自动切换移动布局
 - **meta schema_version=2**：`fast_interval`、`logs_interval`、`logs_updated_at`、`logs_stale`、`source`、`device` 等字段供页面双倒计时与刷新使用
 
+## 界面预览
+
+桌面端（1320px 固定栅格，KPI 三列、实时数据两列）：
+
+![桌面端总览](docs/screenshot-desktop.png)
+
+电池标准属性（整行四列）、实时曲线与总仲裁结果：
+
+![详情与曲线](docs/screenshot-detail.png)
+
+实时会话档案：
+
+![会话档案](docs/screenshot-sessions.png)
+
+手机端（移动布局，KPI 单列、卡片双列小格）：
+
+![手机端](docs/screenshot-mobile.png)
+
 ## 运行
 
 ```powershell
