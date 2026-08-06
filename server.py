@@ -148,6 +148,7 @@ class AdbReader:
         self.serial = serial
         self.available = False
         self.last_error = ""
+        self.last_reconnect_at = time.monotonic()
         self.utc_offset_minutes = 0
         self._init()
         if self.available:
@@ -207,7 +208,12 @@ class AdbReader:
                 return
             serials = [line.split("\t")[0] for line in out.splitlines()[1:]
                        if line.strip() and "\tdevice" in line]
-            if self.serial:
+            if self.adb_host:
+                # 指定 --adb-host 时优先使用该设备，而不是取 devices 第一台
+                self.available = self.adb_host in serials
+                if self.available:
+                    self.serial = self.adb_host
+            elif self.serial:
                 self.available = self.serial in serials
             elif serials:
                 self.serial = serials[0]
@@ -216,6 +222,17 @@ class AdbReader:
                 self.last_error = "no ADB device in 'device' state"
         except FileNotFoundError:
             self.last_error = "adb executable not found in PATH"
+
+    def ensure_connected(self) -> bool:
+        """ADB 掉线后每 5 秒节流重试 connect + devices，支持自动恢复。"""
+        now = time.monotonic()
+        if self.available:
+            return True
+        if now - self.last_reconnect_at < 5:
+            return False
+        self.last_reconnect_at = now
+        self._init()
+        return self.available
 
     def read_batch(self) -> dict[str, dict]:
         """Returns {node_id: {raw, ok, value}} for all NODES plus battery uevent."""
@@ -246,30 +263,38 @@ class AdbReader:
             self.last_error = "adb executable not found in PATH"
             return {}
 
-    def read_vote_logs(self, tail_bytes: int = 2097152) -> str:
-        """Tail the newest mca_log, filtered to mca_vote lines."""
+    def read_vote_logs(self, tail_bytes: int = 2097152) -> tuple[bool, str]:
+        """Tail the newest mca_log, filtered to mca_vote lines.
+
+        Returns (read_ok, text)：read_ok 表示 ADB/su/文件读取成功；
+        grep 无匹配（退出码 1）不算读取失败，text 可能为空。
+        """
         if not self.available:
-            return ""
+            return False, ""
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n 1"'], timeout=10)
             if code != 0 or not out.strip():
-                return ""
+                return False, ""
             fname = out.strip().splitlines()[0]
             if not re.fullmatch(r"[A-Za-z0-9_.\-]+", fname):
-                return ""
+                return False, ""
             path = f"{MCA_LOG_DIR}/{fname}"
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"tail -c {tail_bytes} {path} | grep -a -E \'mca_vote\'"'],
                 timeout=15)
-            return out if code == 0 else ""
+            # grep 无匹配时退出码为 1，属于“读取成功但无内容”，不算失败
+            return (code in (0, 1), out if code in (0, 1) else "")
         except FileNotFoundError:
-            return ""
+            return False, ""
 
-    def read_session_logs(self, tail_bytes: int = 4194304, file_count: int = 3) -> str:
-        """Grep session events from the newest mca_log files (chronological)."""
+    def read_session_logs(self, tail_bytes: int = 4194304, file_count: int = 3) -> tuple[bool, str]:
+        """Grep session events from the newest mca_log files (chronological).
+
+        Returns (read_ok, text)：与 read_vote_logs 相同，grep 无匹配不算失败。
+        """
         if not self.available:
-            return ""
+            return False, ""
         pattern = ("power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|"
                    "FAST_CHARGE|fast chg success|set chg current|open path ibus|"
                    "smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|"
@@ -278,7 +303,7 @@ class AdbReader:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)
             if code != 0 or not out.strip():
-                return ""
+                return False, ""
             # ls -t 为新到旧，解析需要旧 -> 新，保证会话时间线顺序正确
             files = [
                 f.strip()
@@ -287,14 +312,14 @@ class AdbReader:
             ][:file_count]
             files = list(reversed(files))
             if not files:
-                return ""
+                return False, ""
             script = "; ".join(
                 f"tail -c {tail_bytes} {MCA_LOG_DIR}/{f} | grep -a -E '{pattern}' | grep -v sysfs_show"
                 for f in files)
             code, out, _ = self._run(["shell", "su", "-c", f'"{script}"'], timeout=25)
-            return out if code == 0 else ""
+            return (code in (0, 1), out if code in (0, 1) else "")
         except FileNotFoundError:
-            return ""
+            return False, ""
 
     def read_thermal_dump(self, tail_bytes: int = 65536) -> str:
         """Tail the newest thermal.dump lines (mi_thermald live state)."""
@@ -614,6 +639,9 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
         t = shift_log_time(tm.group(1), offset_minutes)
         kind, label, detail = ev
         if kind == "on":
+            # 新的 power_good_on 到来时，把上一个未结束会话标为结束
+            if cur is not None and not cur["ended"]:
+                cur["ended"] = True
             cur = {
                 "start": t, "ended": False, "events": [],
                 "uuid": None, "tx_adapter": None, "fc_flag": None,
@@ -629,6 +657,9 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
         if kind == "off":
             cur["ended"] = True
             evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+            # 断开后不再向已结束会话追加日志
+            cur = None
+            continue
         elif kind == "auth":
             evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
         elif kind == "uuid":
@@ -690,6 +721,7 @@ class Sampler:
         self.last_wls_icl: int | None = None
         self.last_wls_icl_at: int | None = None
         self.last_wls_icl_log_time: str | None = None
+        self.last_wls_icl_key: tuple[int, str] | None = None
 
     def start(self) -> None:
         threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
@@ -719,7 +751,7 @@ class Sampler:
             return self.snapshot
 
     def collect_fast(self) -> None:
-        if not self.adb.available:
+        if not self.adb.ensure_connected():
             self._publish(self._build_error_snapshot(
                 self.adb.last_error or "ADB device unavailable"))
             return
@@ -753,20 +785,17 @@ class Sampler:
         self._publish(parsed)
 
     def collect_logs(self) -> None:
-        if not self.adb.available:
+        if not self.adb.ensure_connected():
             return
-        vote_log = self.adb.read_vote_logs()
-        session_log = self.adb.read_session_logs()
-        # 空输出 = 命令失败/无输出，保留上次成功数据并标记 stale
-        vote_ok = bool(vote_log.strip())
-        session_ok = bool(session_log.strip())
-
-        if vote_ok:
+        vote_read_ok, vote_log = self.adb.read_vote_logs()
+        session_read_ok, session_log = self.adb.read_session_logs()
+        # 读取成功但内容为空（如 grep 无匹配）不算失败，仅保留旧数据
+        if vote_read_ok and vote_log.strip():
             parsed_voters = parse_vote_blocks(vote_log, self.adb.utc_offset_minutes)
             if parsed_voters:
                 self.last_voters = parsed_voters
 
-        if session_ok:
+        if session_read_ok and session_log.strip():
             parsed_sessions = parse_sessions(session_log, self.adb.utc_offset_minutes)
             if parsed_sessions:
                 self.last_sessions = parsed_sessions
@@ -778,24 +807,44 @@ class Sampler:
                 self.last_wls_icl = None
                 self.last_wls_icl_at = None
                 self.last_wls_icl_log_time = None
+                self.last_wls_icl_key = None
+                self.last_epp = None
             else:
                 icl = parse_wls_icl(session_log, self.adb.utc_offset_minutes)
                 if icl is not None:
-                    self.last_wls_icl, self.last_wls_icl_log_time = icl
-                    self.last_wls_icl_at = int(time.time() * 1000)
+                    value, log_time = icl
+                    new_key = (value, log_time)
+                    # 同一日志行重复扫描时不刷新“几秒前”，避免旧值伪装成新值
+                    if new_key != self.last_wls_icl_key:
+                        self.last_wls_icl_key = new_key
+                        self.last_wls_icl = value
+                        self.last_wls_icl_log_time = log_time
+                        self.last_wls_icl_at = int(time.time() * 1000)
 
-        self.logs_stale = not vote_ok or not session_ok
+        self.logs_stale = not vote_read_ok or not session_read_ok
         self.logs_updated_at = time.time() * 1000
-        with self.lock:
-            core = copy.deepcopy(self.snapshot)
-        # 日志完成后立即合并进当前快照并通知页面
-        self._publish(core)
+        # 复制、合并日志缓存、发布在同一个锁内完成，避免旧快照覆盖新快照
+        self._publish_logs_only()
 
     def _publish(self, core: dict) -> None:
+        self._merge_cached_logs(core)
+        with self.lock:
+            self.snapshot = core
+
+    def _publish_logs_only(self) -> None:
+        """日志线程专用：锁内复制当前快照并合并日志缓存后发布。"""
+        with self.lock:
+            core = copy.deepcopy(self.snapshot)
+            self._merge_cached_logs(core)
+            self.snapshot = core
+
+    def _merge_cached_logs(self, core: dict) -> None:
         core["voters"] = copy.deepcopy(self.last_voters)
         core["sessions"] = copy.deepcopy(self.last_sessions)
         if self.last_epp is not None:
             self._append_epp_node(core, self.last_epp)
+        else:
+            self._remove_epp_node(core)
         if self.last_wls_icl is not None:
             buck = core.get("voters", {}).get("wireless_buck_input")
             if buck is not None:
@@ -814,8 +863,6 @@ class Sampler:
             "device": getattr(self.adb, "serial", None) or "",
             "schema_version": 2,
         })
-        with self.lock:
-            self.snapshot = core
 
     @staticmethod
     def _append_epp_node(parsed: dict, epp: str) -> None:
@@ -829,6 +876,10 @@ class Sampler:
             "id": "epp", "label": "EPP 协商状态", "group": "无线策略实时",
             "unit": "", "fmt": "epp", "value": epp, "ok": True,
         })
+
+    @staticmethod
+    def _remove_epp_node(parsed: dict) -> None:
+        parsed["nodes"] = [n for n in parsed.get("nodes", []) if n.get("id") != "epp"]
 
     def _build_error_snapshot(self, msg: str) -> dict:
         return {
@@ -874,18 +925,18 @@ class Sampler:
 
         # 统一符号：充电为正、放电为负（AOSP 约定，不依赖厂商原始符号）
         batt_status = battery.get("status", {}).get("value", "")
+        batt_status_norm = batt_status.strip().lower().replace("_", " ")
         raw_current_ma = num(battery.get("current_now", {}).get("value", ""))
         if raw_current_ma is not None:
             raw_current_ma /= 1000.0          # uA -> mA
-        if raw_current_ma is not None:
-            if batt_status.lower() == "charging":
-                batt_cur_ma = abs(raw_current_ma)
-            elif batt_status.lower() == "discharging":
-                batt_cur_ma = -abs(raw_current_ma)
-            else:
-                batt_cur_ma = raw_current_ma
-        else:
+        if raw_current_ma is None:
             batt_cur_ma = None
+        elif batt_status_norm == "charging":
+            batt_cur_ma = abs(raw_current_ma)
+        elif batt_status_norm in ("discharging", "not charging"):
+            batt_cur_ma = -abs(raw_current_ma)
+        else:
+            batt_cur_ma = raw_current_ma
 
         batt_vol_mv = num(battery.get("voltage_now", {}).get("value", ""))
         if batt_vol_mv is not None:
@@ -929,10 +980,10 @@ class Sampler:
                 continue
             v = n.get("value", "")
             if v.lower() in ("unknown", ""):
-                if batt_status.lower() in ("discharging", "not charging"):
+                if batt_status_norm in ("discharging", "not charging"):
                     n["value"] = "未连接（放电中）"
                     n["ok"] = True
-                elif batt_status.lower() == "charging":
+                elif batt_status_norm == "charging":
                     n["value"] = "未识别（充电中）"
                     n["ok"] = True
             break

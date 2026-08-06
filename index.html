@@ -492,8 +492,7 @@ function renderGroups(d) {
       const has = item && item.ok && item.value !== "";
       let v = `<span class="empty">不可读</span>`;
       if (has) {
-        const num = Number(item.value);
-        const shown = Number.isFinite(num) ? batteryConv(key, item.value) : item.value;
+        const shown = getBatteryShownValue(d, key, item);
         v = `<span>${esc(shown)}<small>${batteryUnit(key)}</small></span>`;
       }
       el.innerHTML = v;
@@ -510,6 +509,22 @@ function batteryConv(key, raw) {
 function batteryUnit(key) {
   const f = BATTERY_FIELDS.find(x => x[0] === key);
   return f ? f[3] : "";
+}
+
+function getBatteryShownValue(d, key, item) {
+  // 电池标准属性里的 current_now 也使用归一化符号（充电为正、放电为负），
+  // 与顶部 KPI 保持一致；原始 JSON 仍保留内核原值方便排查。
+  if (
+    key === "current_now" &&
+    d.derived &&
+    Number.isFinite(Number(d.derived.batt_current_ma))
+  ) {
+    return Number(d.derived.batt_current_ma).toFixed(1);
+  }
+  const num = Number(item.value);
+  return Number.isFinite(num)
+    ? batteryConv(key, item.value)
+    : item.value;
 }
 
 function buildGroups(d) {
@@ -530,8 +545,7 @@ function buildGroups(d) {
     const has = item && item.ok && item.value !== "";
     let v = `<span class="empty">不可读</span>`;
     if (has) {
-      const num = Number(item.value);
-      const shown = Number.isFinite(num) ? conv(num) : item.value;
+      const shown = getBatteryShownValue(d, key, item);
       v = `<span>${esc(shown)}<small>${unit}</small></span>`;
     }
     return `<div class="tile${wide ? " wide" : ""}"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
@@ -830,11 +844,8 @@ function render(data) {
   const staleEl = $("logsStaleBadge");
   if (staleEl) staleEl.style.display = logsStale ? "" : "none";
   renderGroups(data);
-  const votersJson = JSON.stringify(data.voters || {});
-  if (votersJson !== lastVotersJson) {
-    lastVotersJson = votersJson;
-    renderVoters(data);
-  }
+  // 每次快速刷新都重绘投票区，让“Ns前”等相对时间持续增长
+  renderVoters(data);
   renderCharts(data);
   const sessionsJson = JSON.stringify(data.sessions || []);
   if (sessionsJson !== lastSessionsJson) {
