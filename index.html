@@ -19,6 +19,12 @@
     --purple: #a78bfa;
   }
   * { box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    min-height: 100%;
+    overflow-y: auto;
+    touch-action: pan-y;
+  }
   body {
     margin: 0;
     background: var(--bg);
@@ -36,6 +42,7 @@
   }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
   .dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.loading { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
   .dot.offline { background: var(--red); box-shadow: 0 0 8px var(--red); }
   .spacer { flex: 1; }
   .meta { color: var(--muted); font-size: 12px; }
@@ -105,6 +112,7 @@
   .kv .v small { color: var(--muted); margin-left: 4px; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
   .tiles.batt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tiles.batt .tile.wide { grid-column: 1 / -1; }
   .tile {
     background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
     padding: 8px 10px; min-width: 0;
@@ -239,6 +247,15 @@
     .charts { grid-template-columns: 1fr; }
     th, td { font-size: 11px; padding: 5px 6px; }
   }
+
+  @media (max-width: 600px) {
+    body { padding: 12px 10px 36px; }
+    .grid { grid-template-columns: minmax(0, 1fr); }
+    .tiles.batt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .card { padding: 12px 10px; }
+    table { display: block; overflow-x: auto; }
+    canvas { height: 100px; }
+  }
 </style>
 </head>
 <body>
@@ -251,7 +268,8 @@
     <div class="spacer"></div>
     <div class="meta">
       设备：<b id="metaDevice">-</b> ｜ 采样：<b id="metaInterval">3</b>s ｜
-      最后更新：<b id="lastUpdate">-</b> ｜ 下次刷新：<b id="countdown">-</b>
+      最后更新：<b id="lastUpdate">-</b> ｜
+      实时刷新：<b id="fastCountdown">-</b> ｜ 日志刷新：<b id="logsCountdown">-</b>
     </div>
   </header>
 
@@ -279,12 +297,12 @@
     </div>
   </section>
 
-  <div class="section-title">电流投票实时表 <span class="badge">全部主题 · 3 秒刷新</span>
+  <div class="section-title">电流投票实时表 <span class="badge">全部主题 · 20 秒刷新</span>
     <span id="logsStaleBadge" class="badge" style="display:none;color:var(--amber);border-color:rgba(251,191,36,.5)">日志读取失败 · 显示上次成功数据</span>
   </div>
   <section class="grid" id="voteTopics" aria-label="电流投票实时表"></section>
 
-  <div class="section-title">实时会话档案 <span class="badge">mca_log 最近会话 · 3 秒刷新</span></div>
+  <div class="section-title">实时会话档案 <span class="badge">mca_log 最近会话 · 20 秒刷新</span></div>
   <section class="grid" id="liveSessions" aria-label="实时会话档案"></section>
 
   <details id="rawDetails">
@@ -323,8 +341,8 @@ let lastGroupsStruct = "";
 
 const KPI = [
   { id: "input_power_w", label: "无线输入功率", unit: "W", digits: 2, hint: "vout × iout（典型 15–17W）" },
-  { id: "battery_power_w", label: "电池充电功率", unit: "W", digits: 2, hint: "|电池电流| × 电池电压" },
-  { id: "batt_current_ma", label: "电池电流", unit: "mA", digits: 0, hint: "充电为负值" },
+  { id: "battery_power_w", label: "电池功率", unit: "W", digits: 2, hint: "正值为充电，负值为放电" },
+  { id: "batt_current_ma", label: "电池电流", unit: "mA", digits: 0, hint: "充电为正，放电为负" },
   { id: "batt_voltage_mv", label: "电池电压", unit: "mV", digits: 0, hint: "单电芯实测电压" },
   { id: "capacity", label: "电量 SOC", unit: "%", digits: 1, hint: "battery uevent" },
   { id: "temp_c", label: "电池温度", unit: "°C", digits: 1, hint: "battery uevent" },
@@ -337,14 +355,14 @@ const BATTERY_FIELDS = [
   ["temp", "TEMP", v => (v / 10).toFixed(1), "°C", "0.1°C → °C", "温度"],
   ["status", "STATUS", v => v, "", "", "状态"],
   ["health", "HEALTH", v => v, "", "", "健康"],
-  ["input_current_limit", "INPUT_CURRENT_LIMIT", v => v, "mA", "", "输入限流"],
+  ["input_current_limit", "INPUT_CURRENT_LIMIT", v => (v / 1000).toFixed(0), "mA", "µA → mA", "输入电流上限"],
   ["cycle_count", "CYCLE_COUNT", v => v, "次", "", "循环次数"],
   ["charge_full", "CHARGE_FULL", v => (v / 1000).toFixed(0), "mAh", "µAh → mAh", "满充容量"],
   ["charge_counter", "CHARGE_COUNTER", v => (v / 1000).toFixed(0), "mAh", "µAh → mAh", "累计充电"],
-  ["time_to_full_now", "TIME_TO_FULL_NOW", v => v, "min", "", "充满剩余"],
+  ["time_to_full_now", "TIME_TO_FULL_NOW", v => v > 0 ? Math.ceil(v / 60) : v, "min", "秒 → 分钟", "预计充满剩余"],
   ["voltage_max_design", "VOLTAGE_MAX_DESIGN", v => (v / 1000).toFixed(3), "V", "µV → V", "设计电压上限"],
-  ["technology", "TECHNOLOGY", v => v, "", "", "电池类型"],
-  ["model_name", "MODEL_NAME", v => v, "", "", "电池型号"],
+  ["technology", "TECHNOLOGY", v => v, "", "", "电池类型", true],
+  ["model_name", "MODEL_NAME", v => v, "", "", "电池型号", true],
   ["present", "PRESENT", v => v, "", "", "电池在位"],
   ["capacity_level", "CAPACITY_LEVEL", v => v, "", "", "电量等级"],
 ];
@@ -371,7 +389,7 @@ function flash(id, value) {
 }
 
 function setStatus(mode, text) {
-  $("statusDot").className = "dot " + (mode === "live" ? "live" : "offline");
+  $("statusDot").className = "dot " + (mode === "live" ? "live" : mode === "loading" ? "loading" : "offline");
   $("statusText").textContent = text;
 }
 
@@ -381,7 +399,7 @@ function renderOffline(data) {
   const banner = $("offlineBanner");
   banner.classList.add("show");
   banner.textContent = "采集失败：" + (data.error || "未知错误") +
-    "。当前不显示任何伪造数据，请检查 ADB 连接后页面会自动恢复。";
+    "。当前不显示任何伪造数据，请确认 server.py 正在运行并且 ADB 设备在线。";
   $("metaDevice").textContent = data.meta && data.meta.adb ? data.meta.adb : "-";
   $("metaInterval").textContent = data.meta ? data.meta.interval : "3";
   $("lastUpdate").textContent = data.iso || "-";
@@ -389,6 +407,7 @@ function renderOffline(data) {
   $("kpis").innerHTML = KPI.map(k =>
     `<div class="kpi"><div class="label">${k.label}</div><div class="value empty">--</div></div>`).join("");
   $("groups").innerHTML = "";
+  lastGroupsStruct = "";
   $("voteTopics").innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">离线</span></h2>` +
     `<p class="note">设备离线，暂无投票数据。</p></div>`;
   $("liveSessions").innerHTML = `<div class="card"><h2>实时会话档案<span class="tag">离线</span></h2>` +
@@ -413,10 +432,6 @@ function renderKpis(d) {
   KPI.forEach(k => flash("kpi-" + k.id, d[k.id]));
 }
 
-function renderNode(node) {
-  return renderNodeTile(node);
-}
-
 function renderNodeBody(node) {
   let body = `<span class="empty">不可读</span>`;
   if (node.ok && node.value) {
@@ -434,6 +449,11 @@ function renderNodeBody(node) {
       body = `<span class="${on ? "" : "bad"}">${on ? "已建立（EPP 协商成功）" : "未建立（仅 BPP）"}</span>`;
     } else if (node.fmt === "ichg") {
       body = `<span>${esc(node.value)}</span>`;
+    } else if (node.fmt === "ua_to_ma") {
+      const n = Number(node.value);
+      body = Number.isFinite(n)
+        ? `<span title="原始值 ${esc(node.value)} µA（策略上限，非实时测量）">${fmt(n / 1000, 0)}<small>${node.unit || "mA"}</small></span>`
+        : `<span class="bad">${esc(node.value)}</span>`;
     } else if (node.fmt === "num") {
       const n = Number(node.value);
       body = `<span class="${Number.isFinite(n) ? "" : "bad"}">${esc(node.value)}<small>${node.unit}</small></span>`;
@@ -444,13 +464,14 @@ function renderNodeBody(node) {
   return body;
 }
 
-function renderNodeTile(node) {
+function renderNode(node) {
   const wide = node.fmt === "wls" || node.fmt === "ichg" ? " wide" : "";
   return `<div class="tile${wide}"><div class="k">${esc(node.label)}</div>` +
     `<div class="v" data-node="${node.id}">${renderNodeBody(node)}</div></div>`;
 }
 
 function renderGroups(d) {
+  // 结构签名：分组/节点/电池字段是否变化；值变化不走这里（增量更新）
   const struct = JSON.stringify({
     groups: d.nodes.map(n => [n.group, n.id, n.fmt, n.label]),
     batt: BATTERY_FIELDS.map(f => f[0]),
@@ -459,6 +480,7 @@ function renderGroups(d) {
     lastGroupsStruct = struct;
     buildGroups(d);
   } else {
+    // 增量更新：只替换数值，不重建 DOM
     d.nodes.forEach(n => {
       const el = document.querySelector(`[data-node="${n.id}"]`);
       if (el) el.innerHTML = renderNodeBody(n);
@@ -481,7 +503,8 @@ function renderGroups(d) {
 
 function batteryConv(key, raw) {
   const f = BATTERY_FIELDS.find(x => x[0] === key);
-  return f ? f[2](raw) : raw;
+  if (f) return f[2](raw);
+  return raw;
 }
 
 function batteryUnit(key) {
@@ -502,7 +525,7 @@ function buildGroups(d) {
       `<div class="tiles">${tiles}${extra}</div></div>`;
   });
 
-  const battRows = BATTERY_FIELDS.map(([key, ukey, conv, unit, hint, label]) => {
+  const battRows = BATTERY_FIELDS.map(([key, ukey, conv, unit, hint, label, wide]) => {
     const item = d.battery[key] || d.battery[ukey.toLowerCase()];
     const has = item && item.ok && item.value !== "";
     let v = `<span class="empty">不可读</span>`;
@@ -511,7 +534,7 @@ function buildGroups(d) {
       const shown = Number.isFinite(num) ? conv(num) : item.value;
       v = `<span>${esc(shown)}<small>${unit}</small></span>`;
     }
-    return `<div class="tile"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
+    return `<div class="tile${wide ? " wide" : ""}"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
       `<div class="v" data-batt="${key}">${v}</div></div>`;
   }).join("");
   cards.push(`<div class="card"><h2>电池标准属性<span class="tag">battery uevent</span></h2>` +
@@ -531,16 +554,15 @@ function renderVoters(d) {
 
   const effectiveOf = b => {
     if (!b) return null;
-    // 驱动实测 icl（wireless loop）优先：投票最小值可能包含模式专属票（如 wireless_qc）
-    if (b.icl !== undefined && b.icl !== null) {
-      return { client: "wireless loop icl", value: b.icl, calc: false, source: "icl" };
-    }
+    // MCA 驱动 effective vote is now 是唯一首选仲裁结果
     if (b.result) return { client: b.result.client, value: b.result.value, calc: false };
-    if (b.unit === "mA") {
+    // 只有已核实为 MIN/MAX 的 votable 才允许按投票表推算
+    if ((b.policy === "MIN" || b.policy === "MAX") && b.unit === "mA") {
       const enabled = (b.rows || []).filter(r => r.enable === 1);
       if (enabled.length) {
-        const min = enabled.reduce((a, b) => b.value < a.value ? b : a);
-        return { client: min.client, value: min.value, calc: true };
+        const pick = enabled.reduce((a, r) =>
+          b.policy === "MAX" ? (r.value > a.value ? r : a) : (r.value < a.value ? r : a));
+        return { client: pick.client, value: pick.value, calc: true };
       }
     }
     return null;
@@ -548,12 +570,35 @@ function renderVoters(d) {
   const summary = [];
   const addSummary = (label, eff, fmt) => {
     if (!eff) return;
-    const srcTip = eff.source === "icl" ? "驱动 wireless loop 实测 icl" :
-      eff.calc ? "驱动未输出 effective 行，按启用投票取最小值推算" : "驱动 effective 仲裁结果";
+    const srcTip = eff.calc
+      ? "驱动未输出 effective 行，按已核实 policy 推算"
+      : "驱动 effective vote is now 仲裁结果";
     summary.push(`<span class="chip" title="${srcTip}">` +
-      `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : eff.source === "icl" ? " · 实测" : ""}</small></span>`);
+      `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : ""}</small></span>`);
   };
-  addSummary("无线输入限流", effectiveOf(topics.wireless_buck_input), v => `${v}mA`);
+  const buck = topics.wireless_buck_input;
+  const mcaEff = effectiveOf(buck);
+  const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
+    ? d.derived.iout : null;
+  addSummary("无线输入限流", mcaEff, v => `${v}mA`);
+  if (buck && buck.icl !== undefined && buck.icl !== null) {
+    const ago = buck.icl_at ? Math.max(0, Math.round((Date.now() - buck.icl_at) / 1000)) : null;
+    let diff = "";
+    if (mcaEff && mcaEff.value !== null && mcaEff.value !== undefined) {
+      diff = ` · Δ${buck.icl - mcaEff.value}mA`;
+    }
+    summary.push(`<span class="chip" title="驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）">` +
+      `实际下发 ICL<b>${buck.icl}</b><small>mA${ago !== null ? " · " + ago + "s前" : ""}${diff}</small></span>`);
+  }
+  if (ioutNow !== null) {
+    summary.push(`<span class="chip" title="wls_debug 实时输出电流">实时 iout<b>${fmt(ioutNow, 0)}</b><small>mA</small></span>`);
+  }
+  if (buck && buck.icl !== undefined && buck.icl !== null && ioutNow !== null &&
+      Math.abs(buck.icl - ioutNow) > 200) {
+    summary.push(`<span class="chip" style="color:var(--amber);border-color:rgba(251,191,36,.5)" ` +
+      `title="ICL 与实时 iout 相差超过 200mA，可能为旧日志或处于不同控制阶段">` +
+      `ICL 与 iout 不一致<b>Δ${Math.round(Math.abs(buck.icl - ioutNow))}</b><small>mA</small></span>`);
+  }
   addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
   addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
   addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
@@ -590,22 +635,36 @@ function renderVoters(d) {
         `${unit ? `<small>${unit}</small>` : ""}</span>`;
     }).join("");
     const changedText = b.changed
-      ? ` · 最近变动 ${esc(b.changed.client)} → ${b.changed.value}`
+      ? ` · 最近变动 ${esc(b.changed.client)} ${b.changed.enabled ? "on" : "off"} → ${b.changed.value}${b.changed.time ? " @ " + b.changed.time : ""}`
       : "";
     let resultText = "";
     if (b.result) {
-      resultText = `<span class="vote-result">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}</span>`;
-    } else if (b.icl !== undefined && b.icl !== null) {
-      resultText = `<span class="vote-result" title="驱动 wireless loop 实测 icl">驱动实测 <b>${b.icl}</b>${b.unit || "mA"}</span>`;
-    } else if (b.unit === "mA" && rows.length) {
+      resultText = `<span class="vote-result" title="驱动 effective vote is now">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}` +
+        `${b.result.time ? `<small> · ${esc(b.result.time)}</small>` : ""}</span>`;
+    } else if ((b.policy === "MIN" || b.policy === "MAX") && b.unit === "mA" && rows.length) {
       const enabled = rows.filter(r => r.enable === 1);
       if (enabled.length) {
-        const min = enabled.reduce((a, b) => b.value < a.value ? b : a);
-        resultText = `<span class="vote-result calc" title="驱动未输出 effective 行，按启用投票取最小值推算">计算生效 <b>${esc(min.client)}</b> → ${min.value}${b.unit}</span>`;
+        const pick = enabled.reduce((a, r) =>
+          b.policy === "MAX" ? (r.value > a.value ? r : a) : (r.value < a.value ? r : a));
+        resultText = `<span class="vote-result calc" title="驱动未输出 effective 行，按已核实 policy=${b.policy} 推算">理论${b.policy} <b>${esc(pick.client)}</b> → ${pick.value}${b.unit}</span>`;
       }
+    } else if (!b.result) {
+      resultText = `<span class="vote-result calc" title="未捕获驱动 effective 行，且该主题仲裁类型未知，不做推算">未捕获驱动 effective 行</span>`;
+    }
+    let iclText = "";
+    if (b.icl !== undefined && b.icl !== null) {
+      const ago = b.icl_at ? Math.max(0, Math.round((Date.now() - b.icl_at) / 1000)) : null;
+      let diff = "";
+      if (b.result) diff = ` · Δ${b.icl - b.result.value}mA`;
+      iclText = `<span class="vote-result" title="驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）">实际下发 ICL <b>${b.icl}</b>mA` +
+        `<small>${b.icl_time ? esc(b.icl_time) + " " : ""}${ago !== null ? ago + "s前" : ""}${diff}</small></span>`;
+    }
+    let ioutText = "";
+    if (t === "wireless_buck_input" && ioutNow !== null) {
+      ioutText = `<span class="vote-result" title="wls_debug 实时输出电流">实时 iout <b>${fmt(ioutNow, 0)}</b><small>mA</small></span>`;
     }
     return `<div class="card"><h2>${esc(t)}<span class="tag">生效 ${active}/${rows.length}</span></h2>` +
-      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}</div>` +
+      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}${ioutText}</div>` +
       `<div class="vote-chips">${chips}</div></div>`;
   }).join("");
   el.innerHTML = summaryCard + cards;
@@ -714,10 +773,10 @@ function renderSessions(d) {
     return;
   }
   const cards = list.slice().reverse().map((s, i) => {
-    const meta = [
-      s.uuid ? `UUID ${s.uuid}` : null,
-      s.tx_adapter ? s.tx_adapter : null,
-      s.fc_flag !== null && s.fc_flag !== undefined ? `fast chg ${s.fc_flag}` : null,
+  const meta = [
+    s.uuid ? `UUID ${s.uuid}` : null,
+    s.tx_adapter ? s.tx_adapter : null,
+    s.fc_flag !== null && s.fc_flag !== undefined && s.fc_flag !== "" ? `fast chg ${s.fc_flag}` : null,
       s.peak_limit_ma !== null && s.peak_limit_ma !== undefined ? `峰值限流 ${s.peak_limit_ma}mA` : null,
       s.final_limit_ma !== null && s.final_limit_ma !== undefined ? `当前限流 ${s.final_limit_ma}mA` : null,
       s.opens ? `打开路径 ${s.opens} 次` : null,
@@ -745,6 +804,20 @@ function render(data) {
     $("rawJson").textContent = JSON.stringify(data, null, 2);
   }
   $("offlineBanner").classList.remove("show");
+
+  if (data.mode === "loading") {
+    resetRenderSignatures();
+    setStatus("loading", "正在连接 ADB 设备");
+    const banner = $("offlineBanner");
+    banner.classList.add("show");
+    banner.textContent = data.error || "正在初始化采集…";
+    $("kpis").innerHTML = KPI.map(k =>
+      `<div class="kpi"><div class="label">${k.label}</div><div class="value empty">--</div></div>`).join("");
+    $("groups").innerHTML = "";
+    $("voteTopics").innerHTML = "";
+    $("liveSessions").innerHTML = "";
+    return;
+  }
 
   if (data.mode !== "live" || !data.connected) {
     resetRenderSignatures();
@@ -777,21 +850,33 @@ function resetRenderSignatures() {
   lastGroupsStruct = "";
 }
 
+let lastMeta = {};
+
 async function load() {
   lastFetchAt = Date.now();
   try {
-    const res = await fetch("/api/data", { cache: "no-store" });
+    const res = await fetch("/api/data", {
+      cache: "no-store",
+    });
     if (!res.ok) throw new Error("HTTP " + res.status);
+
     const data = await res.json();
-    if (data.meta && data.meta.interval) pollMs = Math.max(1000, data.meta.interval * 1000);
+    if (data.meta) {
+      lastMeta = data.meta;
+      if (data.meta.fast_interval) {
+        pollMs = Math.max(1000, data.meta.fast_interval * 1000);
+      }
+    }
     render(data);
   } catch (err) {
     console.error("load failed:", err);
     setStatus("offline", "服务连接失败");
     const banner = $("offlineBanner");
     banner.classList.add("show");
-    banner.textContent = "无法获取数据：" + err.message + "。请确认后端 server.py 正在运行。";
+    banner.textContent = "无法获取数据：" + err.message +
+      "。请确认 server.py 正在运行并且 ADB 设备在线。";
   } finally {
+    clearTimeout(timer);
     timer = setTimeout(load, pollMs);
   }
 }
@@ -799,7 +884,13 @@ async function load() {
 setInterval(() => {
   if (!lastFetchAt) return;
   const remain = Math.max(0, (lastFetchAt + pollMs - Date.now()) / 1000);
-  $("countdown").textContent = remain.toFixed(1) + "s";
+  const fc = $("fastCountdown");
+  if (fc) fc.textContent = remain.toFixed(1) + "s";
+  const logsInterval = (lastMeta.logs_interval || 20) * 1000;
+  const logsRemain = Math.max(0,
+    (lastMeta.logs_updated_at || Date.now()) + logsInterval - Date.now());
+  const lc = $("logsCountdown");
+  if (lc) lc.textContent = (logsRemain / 1000).toFixed(1) + "s";
 }, 250);
 
 load();

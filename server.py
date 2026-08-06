@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Redmi K80 Pro (miro) MCA charging real-time dashboard backend.
+Redmi K80 Pro (miro) MCA charging real-time dashboard backend (ADB 版).
 
-Reads all charging real-time sysfs nodes via ADB (root) every <interval>
-seconds, keeps a short history, and serves:
-
-    /           -> index.html (single-page dashboard, auto refresh)
-    /api/data   -> JSON snapshot used by the page
+数据语义与安卓版 SnapshotCollector.java 对齐：
+- 快速采集（sysfs + battery + thermal + history）默认 3 秒
+- 日志采集（voters / sessions / EPP / 实际下发 ICL）默认 20 秒
+- 电池电流约定：充电为正、放电为负；电池功率保留正负号
+- 日志读取失败保留上次成功数据，并由 logs_stale 标记
+- 会话/投票/仲裁输出与安卓版同构
 
 Usage:
-    python server.py                    # defaults: adb 192.168.5.13:5555, port 8765, 3s
-    python server.py --port 9000 --interval 5 --adb-host 192.168.1.10:5555
+    python server.py                    # defaults: adb 192.168.5.13:5555, port 8765
+    python server.py --port 9000 --interval 5 --logs-interval 20 --adb-host 192.168.1.10:5555
 
-The page polls /api/data every 3 s (or the server's configured interval).
-When the ADB device is unreachable the page shows an offline/error state;
-no fake data is generated.
+The page polls /api/data every fast_interval seconds. When the ADB device
+is unreachable the page shows an offline/error state; no fake data is generated.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -68,14 +69,15 @@ THERMAL_SCENES = {
     "YUANSHEN-MONITOR-WIRELESS": "yuanshen（原神）",
 }
 
-# Every live node collected from the device.  group/label are used by the
-# HTML page to render "all charging real-time data" in one page.
+
+# Every live node collected from the device.  group/label/unit/fmt 与安卓版
+# SnapshotCollector.java 保持一致；ua_to_ma 表示原始值 µA，页面换算成 mA。
 NODES = [
     # --- 私有快充协商 (soc:mca_business_charger) ---
     dict(id="quick_charge_type", path="soc:mca_business_charger/quick_charge_type",
          label="私有快充类型", group="私有快充协商", unit="", fmt="text"),
     dict(id="real_type", path="soc:mca_business_charger/real_type",
-         label="真实协议名", group="私有快充协商", unit="", fmt="text"),
+         label="驱动协议类型", group="私有快充协商", unit="", fmt="text"),
     dict(id="power_max", path="soc:mca_business_charger/power_max",
          label="协商最大功率", group="私有快充协商", unit="W", fmt="num"),
     dict(id="is_eu_model", path="soc:mca_business_charger/is_eu_model",
@@ -93,13 +95,19 @@ NODES = [
     dict(id="low_inductance_offset", path="soc:mca_strategy_basic_wireless_class/low_inductance_offset",
          label="低感量偏移", group="无线策略实时", unit="", fmt="num"),
 
+    # --- 有线策略实时 (soc:mca_charger_thermal) ---
+    dict(id="wired_chg_curr", path="soc:mca_charger_thermal/wired_chg_curr",
+         label="有线热控电流上限", group="有线策略实时", unit="mA", fmt="ua_to_ma"),
+    dict(id="wired_ctrl_limit", path="soc:mca_charger_thermal/wired_ctrl_limit",
+         label="有线热控等级", group="有线策略实时", unit="", fmt="num"),
+
     # --- 限流 / 电流投票 (soc:mca_charge_interface, soc:mca_charger_thermal) ---
     dict(id="ichg_limit", path="soc:mca_charge_interface/ichg_limit",
          label="充电电流投票结果", group="电流投票与限流", unit="", fmt="ichg"),
     dict(id="charge_enable", path="soc:mca_charge_interface/charge_enable",
          label="充电使能投票", group="电流投票与限流", unit="", fmt="text"),
     dict(id="wireless_chg_curr", path="soc:mca_charger_thermal/wireless_chg_curr",
-         label="无线热控限流", group="电流投票与限流", unit="mA", fmt="num"),
+         label="无线热控电流上限", group="电流投票与限流", unit="mA", fmt="ua_to_ma"),
 
     # --- 电荷泵 / 电池 BTB ---
     dict(id="ibus_total", path="soc:mca_platform_cp/ibus_total",
@@ -271,8 +279,13 @@ class AdbReader:
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)
             if code != 0 or not out.strip():
                 return ""
-            files = sorted(f for f in out.strip().splitlines()
-                           if re.fullmatch(r"[A-Za-z0-9_.\-]+", f))[:file_count]
+            # ls -t 为新到旧，解析需要旧 -> 新，保证会话时间线顺序正确
+            files = [
+                f.strip()
+                for f in out.splitlines()
+                if re.fullmatch(r"[A-Za-z0-9_.\-]+", f.strip())
+            ][:file_count]
+            files = list(reversed(files))
             if not files:
                 return ""
             script = "; ".join(
@@ -344,15 +357,85 @@ def num(raw: str) -> float | None:
 
 
 VOTE_TIME_RE = re.compile(r"\[(\d{2}:\d{2}:\d{2}:\d{3})")
-VOTE_CHANGED_RE = re.compile(r"mca_vote:\d+ (\w+): ([A-Za-z0-9_.]+),(\d+) voting on of val=(-?\d+)")
-VOTE_RESULT_RE = re.compile(r"mca_vote:\d+ (\w+): effective vote is now (-?\d+) voted by ([A-Za-z0-9_.]+),(\d+)")
+# 与安卓版一致：client 名称允许 @ / : 等字符，且支持 voting off
+VOTE_CHANGED_RE = re.compile(
+    r"mca_vote:\d+ (\w+): "
+    r"([A-Za-z0-9_.@:/\-]+),(\d+) "
+    r"voting (on|off) of val=(-?\d+)")
+VOTE_RESULT_RE = re.compile(
+    r"mca_vote:\d+ (\w+): effective vote is now (-?\d+) "
+    r"voted by ([A-Za-z0-9_.@:/\-]+),(\d+)")
 VOTE_HEADER_RE = re.compile(r"mca_vote:\d+ (\w+) VOTER:")
-VOTE_ROW_RE = re.compile(r"(\d+)\.([A-Za-z0-9_.]+)\s+(\d+)\s+(-?\d+)")
+VOTE_ROW_RE = re.compile(
+    r"(\d+)\.([A-Za-z0-9_.@:/\-]+)\s+(\d+)\s+(-?\d+)")
+
+# 已从 .ko 核实为电流类投票的主题才显式标注 mA，未知主题默认空单位
 VOTE_UNITS = {
     "term_volt": "mV",            # 终止电压阈值（电压）
     "chg_enable": "",             # 充电使能开关（0/1，无单位）
     "quick_chg_disable": "",      # 快充禁用开关（0/1，无单位）
     "wls_quick_chg_disable": "",  # 无线快充禁用开关（0/1，无单位）
+    "wireless_buck_input": "mA",
+    "buck_charge_curr": "mA",
+    "wireless_bpp_in": "mA",
+    "wireless_bppqc2_in": "mA",
+    "wireless_bppqc3_in": "mA",
+    "wireless_epp_in": "mA",
+    "wireless_auth_20w": "mA",
+    "wireless_auth_30w": "mA",
+    "wireless_auth_50w": "mA",
+    "wireless_auth_80w": "mA",
+    "wireless_auth_voice_box": "mA",
+    "wireless_auth_magnet_30w": "mA",
+    "wireless_sw_qc_ich": "mA",
+    "wireless_sw_thermal_ich": "mA",
+    "wls_single_chg_cur": "mA",
+    "wls_multi_chg_cur": "mA",
+    "div1_single": "mA",
+    "div1_multi": "mA",
+    "div2_single": "mA",
+    "div2_multi": "mA",
+    "div4_single": "mA",
+    "div4_multi": "mA",
+    "thermal_flip": "mA",
+    "single_chg_cur": "mA",
+    "multi_chg_cur": "mA",
+}
+
+# 已从 miro 固件 .ko 反汇编核实的仲裁类型：MIN/MAX/FIRST_NONZERO/FIRST_ZERO/UNKNOWN
+VOTE_POLICIES = {
+    # mca_basic_wireless.ko：mca_create_votable(..., 0, ...) 全部为 MIN
+    "wireless_buck_input": "MIN",
+    "wireless_bpp_in": "MIN",
+    "wireless_bppqc2_in": "MIN",
+    "wireless_bppqc3_in": "MIN",
+    "wireless_epp_in": "MIN",
+    "wireless_auth_20w": "MIN",
+    "wireless_auth_30w": "MIN",
+    "wireless_auth_50w": "MIN",
+    "wireless_auth_80w": "MIN",
+    "wireless_auth_voice_box": "MIN",
+    "wireless_auth_magnet_30w": "MIN",
+    "wireless_sw_qc_ich": "MIN",
+    "wireless_sw_thermal_ich": "MIN",
+    # 项目配置（用户确认）：有线 buck 充电电流按 MIN 推算
+    "buck_charge_curr": "MIN",
+    # mca_quick_wireless.ko：wls_single/multi_chg_cur 为 MIN，disable 为 type2（首个非零）
+    "wls_single_chg_cur": "MIN",
+    "wls_multi_chg_cur": "MIN",
+    "wls_quick_chg_disable": "FIRST_NONZERO",
+    # mca_strategy_quickchg（反编译 C）：电流类 type0，disable type2，en type3（首个为零）
+    "quick_chg_disable": "FIRST_NONZERO",
+    "quick_chg_en": "FIRST_ZERO",
+    "div1_single": "MIN",
+    "div1_multi": "MIN",
+    "div2_single": "MIN",
+    "div2_multi": "MIN",
+    "div4_single": "MIN",
+    "div4_multi": "MIN",
+    "thermal_flip": "MIN",
+    "single_chg_cur": "MIN",
+    "multi_chg_cur": "MIN",
 }
 
 
@@ -367,24 +450,32 @@ def shift_log_time(time_str: str, offset_minutes: int) -> str:
 
 
 def parse_vote_blocks(text: str, offset_minutes: int = 0) -> dict:
-    """Parse the latest mca_vote table per topic from mca_log output."""
+    """Parse the latest mca_vote table per topic from mca_log output.
+
+    changed/result 按主题分别缓存，避免日志交错时 A 主题的结果被挂到 B 主题。
+    """
     blocks: dict[str, dict] = {}
     current: dict | None = None
-    pending_changed: dict | None = None
-    pending_result: dict | None = None
+    changes_by_topic: dict[str, dict] = {}
+    results_by_topic: dict[str, dict] = {}
     for line in text.splitlines():
         m = VOTE_CHANGED_RE.search(line)
         if m:
-            pending_changed = {
+            tm = VOTE_TIME_RE.search(line)
+            changes_by_topic[m.group(1)] = {
                 "topic": m.group(1), "client": m.group(2),
-                "idx": int(m.group(3)), "value": int(m.group(4)),
+                "idx": int(m.group(3)), "enabled": m.group(4) == "on",
+                "value": int(m.group(5)),
+                "time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
             }
             continue
         m = VOTE_RESULT_RE.search(line)
         if m:
-            pending_result = {
+            tm = VOTE_TIME_RE.search(line)
+            results_by_topic[m.group(1)] = {
                 "topic": m.group(1), "value": int(m.group(2)),
                 "client": m.group(3), "idx": int(m.group(4)),
+                "time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
             }
             continue
         m = VOTE_HEADER_RE.search(line)
@@ -394,14 +485,13 @@ def parse_vote_blocks(text: str, offset_minutes: int = 0) -> dict:
             current = {
                 "topic": topic,
                 "time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
-                "unit": VOTE_UNITS.get(topic, "mA"),
-                "changed": pending_changed if pending_changed and pending_changed["topic"] == topic else None,
-                "result": pending_result if pending_result and pending_result["topic"] == topic else None,
+                "unit": VOTE_UNITS.get(topic, ""),
+                "policy": VOTE_POLICIES.get(topic, "UNKNOWN"),
+                "changed": changes_by_topic.get(topic),
+                "result": results_by_topic.get(topic),
                 "rows": [],
             }
             blocks[topic] = current
-            pending_changed = None
-            pending_result = None
             continue
         if current is not None:
             m = VOTE_ROW_RE.search(line)
@@ -430,14 +520,28 @@ def parse_epp_status(text: str) -> str | None:
     return last
 
 
-def parse_wls_icl(text: str) -> int | None:
-    """Extract the latest wireless loop icl (driver-applied wireless input limit)."""
+def parse_wls_icl(text: str, offset_minutes: int = 0) -> tuple[int, str] | None:
+    """Extract the latest wireless loop icl (driver-applied wireless input limit).
+
+    Returns (value, shifted local log time) so the frontend can show the value
+    together with its log timestamp and collection time.
+    """
     last = None
     for line in text.splitlines():
         m = re.search(r"wireless loop: icl:(\d+)", line)
         if m:
-            last = int(m.group(1))
+            tm = VOTE_TIME_RE.search(line)
+            log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
+            last = (int(m.group(1)), log_time)
     return last
+
+
+def is_last_wireless_power_off(text: str) -> bool:
+    """True if the last wireless power event is removal (power_good_off)."""
+    return (
+        text.rfind("wireless power_good_off")
+        > text.rfind("wireless power_good_on")
+    )
 
 
 THERMAL_WIRELESS_RE = re.compile(
@@ -492,10 +596,16 @@ def classify_session_line(line: str):
 
 
 def parse_sessions(text: str, offset_minutes: int = 0) -> list:
-    """Group mca_log handshake/limit events into charging sessions (newest last)."""
+    """Group mca_log handshake/limit events into charging sessions.
+
+    与安卓版一致：
+    - 以 power_good_on 建立会话，不再靠 300 秒间隔猜测
+    - power_good_off 也进入“充电板移除”事件并标记会话结束
+    - 所有电流变化 / open path 事件都保留
+    - 会话最多 3 个，每个会话最多 100 条事件
+    """
     sessions: list[dict] = []
     cur: dict | None = None
-    last_ts: str | None = None
     for line in text.splitlines():
         tm = VOTE_TIME_RE.search(line)
         ev = classify_session_line(line)
@@ -504,131 +614,126 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
         t = shift_log_time(tm.group(1), offset_minutes)
         kind, label, detail = ev
         if kind == "on":
-            if cur and cur["events"] and not cur["ended"]:
-                cur["ended"] = True
             cur = {
                 "start": t, "ended": False, "events": [],
                 "uuid": None, "tx_adapter": None, "fc_flag": None,
-                "limits": [], "opens": 0, "smartendura": False,
+                "opens": 0, "smartendura": False,
+                "peak_limit_ma": None, "final_limit_ma": None,
             }
             sessions.append(cur)
-        elif kind == "off":
-            if cur:
-                cur["ended"] = True
-            cur = None
-            last_ts = t
+            cur["events"].append({"kind": kind, "time": t, "label": label, "detail": detail})
             continue
-        else:
-            gap = 0
-            if last_ts:
-                gap = _log_seconds(t) - _log_seconds(last_ts)
-            if cur is None or gap > 300:
-                cur = {
-                    "start": t, "ended": False, "events": [],
-                    "uuid": None, "tx_adapter": None, "fc_flag": None,
-                    "limits": [], "opens": 0, "smartendura": False,
-                }
-                sessions.append(cur)
-        last_ts = t
-        if kind == "uuid" and not cur["uuid"]:
-            cur["uuid"] = detail
-        elif kind == "tx" and not cur["tx_adapter"]:
-            cur["tx_adapter"] = detail
-        elif kind == "fcflag" and not cur["fc_flag"]:
+        if cur is None:
+            continue
+        evs = cur["events"]
+        if kind == "off":
+            cur["ended"] = True
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+        elif kind == "auth":
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+        elif kind == "uuid":
+            if not cur["uuid"]:
+                cur["uuid"] = detail
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+        elif kind == "tx":
+            if not cur["tx_adapter"]:
+                cur["tx_adapter"] = detail
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+        elif kind == "fc":
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+        elif kind == "fcflag":
             cur["fc_flag"] = detail
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
         elif kind == "ichg":
-            cur["limits"].append(int(detail))
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+            v = int(detail)
+            if cur["peak_limit_ma"] is None or v > cur["peak_limit_ma"]:
+                cur["peak_limit_ma"] = v
+            cur["final_limit_ma"] = v
         elif kind == "open":
             cur["opens"] += 1
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
         elif kind == "smart":
             cur["smartendura"] = True
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
 
-        if kind in ("ichg", "open"):
-            exists = any(e["kind"] == kind for e in cur["events"])
-            if not exists:
-                cur["events"].append({"kind": kind, "time": t, "label": label, "detail": detail})
-        else:
-            evs = cur["events"]
-            if not (kind == "smart" and evs and evs[-1]["kind"] == "smart"):
-                evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
-
-    for s in sessions[-3:]:
-        s["peak_limit_ma"] = max(s["limits"]) if s["limits"] else None
-        s["final_limit_ma"] = s["limits"][-1] if s["limits"] else None
-        s.pop("limits", None)
-        s["events"] = s["events"][-12:]
-    return sessions[-3:]
+    while len(sessions) > 3:
+        sessions.pop(0)
+    for s in sessions:
+        while len(s["events"]) > 100:
+            s["events"].pop(0)
+    return sessions
 
 
-class Sampler(threading.Thread):
-    def __init__(self, adb: AdbReader, interval: float):
-        super().__init__(daemon=True)
+class Sampler:
+    """双周期采集：快采集 3s（sysfs/battery/thermal/history），日志采集 20s。
+
+    日志（voters/sessions/EPP/实际 ICL）读取失败时保留上次成功数据，
+    只把 logs_stale 置 True，页面据此提示“显示上次成功数据”。
+    """
+
+    def __init__(self, adb: AdbReader, fast_interval: float, logs_interval: float):
         self.adb = adb
-        self.interval = max(1.0, float(interval))
+        self.fast_interval = max(1.0, float(fast_interval))
+        self.logs_interval = max(5.0, float(logs_interval))
+        self.logs_stale = False
+        self.logs_updated_at = time.time() * 1000
+        # 使用独立 stop_event，避免覆盖 threading.Thread 内部的 _stop()
+        self.stop_event = threading.Event()
         self.history: deque[dict] = deque(maxlen=180)
         self.lock = threading.Lock()
         self.snapshot: dict = self._build_error_snapshot("initializing")
-        self.logs_stale = False
-        self.logs_updated_at = time.time() * 1000
-        self._stop = threading.Event()
+        # 日志缓存：读取失败保留上次成功数据
+        self.last_voters: dict = {}
+        self.last_sessions: list = []
+        self.last_epp: str | None = None
+        self.last_wls_icl: int | None = None
+        self.last_wls_icl_at: int | None = None
+        self.last_wls_icl_log_time: str | None = None
 
-    def run(self):
-        while not self._stop.is_set():
+    def start(self) -> None:
+        threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
+        threading.Thread(target=self.run_logs, name="sampler-logs", daemon=True).start()
+
+    def run_fast(self) -> None:
+        while not self.stop_event.is_set():
             try:
-                self.snapshot = self.collect()
+                self.collect_fast()
             except Exception as exc:  # keep the page alive on any sampling error
-                self.snapshot = self._build_error_snapshot(str(exc))
-            self._stop.wait(self.interval)
+                self._publish(self._build_error_snapshot(str(exc)))
+            self.stop_event.wait(self.fast_interval)
 
-    def stop(self):
-        self._stop.set()
+    def run_logs(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.collect_logs()
+            except Exception as exc:  # 日志失败不打断整体循环
+                print(f"[warn] collect_logs failed: {exc}")
+            self.stop_event.wait(self.logs_interval)
+
+    def stop(self) -> None:
+        self.stop_event.set()
 
     def get(self) -> dict:
         with self.lock:
             return self.snapshot
 
-    def _build_error_snapshot(self, msg: str) -> dict:
-        return {
-            "ts": time.time(), "iso": now_iso(), "mode": "offline",
-            "connected": False, "error": msg, "nodes": [],
-            "battery": {}, "derived": {}, "history": [], "voters": {}, "sessions": [],
-            "thermal": {},
-            "meta": {"interval": self.interval},
-        }
-
-    def collect(self) -> dict:
+    def collect_fast(self) -> None:
         if not self.adb.available:
-            return self._build_error_snapshot(self.adb.last_error or "ADB device unavailable")
+            self._publish(self._build_error_snapshot(
+                self.adb.last_error or "ADB device unavailable"))
+            return
         batch = self.adb.read_batch()
         if not batch:
-            return self._build_error_snapshot(self.adb.last_error or "ADB read failed")
+            self._publish(self._build_error_snapshot(
+                self.adb.last_error or "ADB read failed"))
+            return
 
         raw = self._normalize_live(batch)
         parsed = self._build(raw)
         parsed["mode"] = "live"
         parsed["connected"] = True
-        parsed["voters"] = parse_vote_blocks(
-            self.adb.read_vote_logs(), self.adb.utc_offset_minutes)
-        session_log = self.adb.read_session_logs()
-        parsed["sessions"] = parse_sessions(session_log, self.adb.utc_offset_minutes)
-        epp = parse_epp_status(session_log)
-        if epp is not None:
-            parsed["nodes"].append({
-                "id": "epp", "label": "EPP 协商状态", "group": "无线策略实时",
-                "unit": "", "fmt": "epp", "value": epp, "ok": True,
-            })
-        icl = parse_wls_icl(session_log)
-        if icl is not None and "wireless_buck_input" in parsed["voters"]:
-            parsed["voters"]["wireless_buck_input"]["icl"] = icl
         parsed["thermal"] = parse_thermal_dump(self.adb.read_thermal_dump())
-        self.logs_stale = not bool(session_log.strip())
-        self.logs_updated_at = time.time() * 1000
-        parsed["meta"].update({
-            "fast_interval": 3,
-            "logs_interval": self.interval,
-            "logs_updated_at": self.logs_updated_at,
-            "logs_stale": self.logs_stale,
-        })
 
         with self.lock:
             sample = {
@@ -645,7 +750,104 @@ class Sampler(threading.Thread):
             }
             self.history.append(sample)
             parsed["history"] = list(self.history)
-        return parsed
+        self._publish(parsed)
+
+    def collect_logs(self) -> None:
+        if not self.adb.available:
+            return
+        vote_log = self.adb.read_vote_logs()
+        session_log = self.adb.read_session_logs()
+        # 空输出 = 命令失败/无输出，保留上次成功数据并标记 stale
+        vote_ok = bool(vote_log.strip())
+        session_ok = bool(session_log.strip())
+
+        if vote_ok:
+            parsed_voters = parse_vote_blocks(vote_log, self.adb.utc_offset_minutes)
+            if parsed_voters:
+                self.last_voters = parsed_voters
+
+        if session_ok:
+            parsed_sessions = parse_sessions(session_log, self.adb.utc_offset_minutes)
+            if parsed_sessions:
+                self.last_sessions = parsed_sessions
+            epp = parse_epp_status(session_log)
+            if epp is not None:
+                self.last_epp = epp
+            if is_last_wireless_power_off(session_log):
+                # 无线已断开：清掉旧 ICL，避免上一个会话的值继续显示
+                self.last_wls_icl = None
+                self.last_wls_icl_at = None
+                self.last_wls_icl_log_time = None
+            else:
+                icl = parse_wls_icl(session_log, self.adb.utc_offset_minutes)
+                if icl is not None:
+                    self.last_wls_icl, self.last_wls_icl_log_time = icl
+                    self.last_wls_icl_at = int(time.time() * 1000)
+
+        self.logs_stale = not vote_ok or not session_ok
+        self.logs_updated_at = time.time() * 1000
+        with self.lock:
+            core = copy.deepcopy(self.snapshot)
+        # 日志完成后立即合并进当前快照并通知页面
+        self._publish(core)
+
+    def _publish(self, core: dict) -> None:
+        core["voters"] = copy.deepcopy(self.last_voters)
+        core["sessions"] = copy.deepcopy(self.last_sessions)
+        if self.last_epp is not None:
+            self._append_epp_node(core, self.last_epp)
+        if self.last_wls_icl is not None:
+            buck = core.get("voters", {}).get("wireless_buck_input")
+            if buck is not None:
+                buck["icl"] = self.last_wls_icl
+                buck["icl_time"] = self.last_wls_icl_log_time or ""
+                buck["icl_at"] = self.last_wls_icl_at or 0
+        meta = core.setdefault("meta", {})
+        meta.update({
+            "interval": self.fast_interval,
+            "fast_interval": self.fast_interval,
+            "logs_interval": self.logs_interval,
+            "logs_updated_at": int(self.logs_updated_at),
+            "logs_stale": self.logs_stale,
+            "adb": getattr(self.adb, "serial", None) or "",
+            "source": "adb",
+            "device": getattr(self.adb, "serial", None) or "",
+            "schema_version": 2,
+        })
+        with self.lock:
+            self.snapshot = core
+
+    @staticmethod
+    def _append_epp_node(parsed: dict, epp: str) -> None:
+        nodes = parsed.get("nodes", [])
+        for n in nodes:
+            if n.get("id") == "epp":
+                n["value"] = epp
+                n["ok"] = True
+                return
+        nodes.append({
+            "id": "epp", "label": "EPP 协商状态", "group": "无线策略实时",
+            "unit": "", "fmt": "epp", "value": epp, "ok": True,
+        })
+
+    def _build_error_snapshot(self, msg: str) -> dict:
+        return {
+            "ts": time.time(), "iso": now_iso(), "mode": "offline",
+            "connected": False, "error": msg, "nodes": [],
+            "battery": {}, "derived": {}, "history": [], "voters": {},
+            "sessions": [], "thermal": {},
+            "meta": {
+                "interval": self.fast_interval,
+                "fast_interval": self.fast_interval,
+                "logs_interval": self.logs_interval,
+                "logs_updated_at": int(self.logs_updated_at),
+                "logs_stale": self.logs_stale,
+                "adb": getattr(self.adb, "serial", None) or "",
+                "source": "adb",
+                "device": getattr(self.adb, "serial", None) or "",
+                "schema_version": 2,
+            },
+        }
 
     @staticmethod
     def _normalize_live(batch: dict[str, dict]) -> dict:
@@ -670,10 +872,22 @@ class Sampler(threading.Thread):
         ts = time.time()
         wls = parse_wls_debug(nodes.get("wls_debug", {}).get("value", ""))
 
-        batt_cur_ma = num(battery.get("current_now", {}).get("value", ""))
+        # 统一符号：充电为正、放电为负（AOSP 约定，不依赖厂商原始符号）
+        batt_status = battery.get("status", {}).get("value", "")
+        raw_current_ma = num(battery.get("current_now", {}).get("value", ""))
+        if raw_current_ma is not None:
+            raw_current_ma /= 1000.0          # uA -> mA
+        if raw_current_ma is not None:
+            if batt_status.lower() == "charging":
+                batt_cur_ma = abs(raw_current_ma)
+            elif batt_status.lower() == "discharging":
+                batt_cur_ma = -abs(raw_current_ma)
+            else:
+                batt_cur_ma = raw_current_ma
+        else:
+            batt_cur_ma = None
+
         batt_vol_mv = num(battery.get("voltage_now", {}).get("value", ""))
-        if batt_cur_ma is not None:
-            batt_cur_ma = batt_cur_ma / 1000.0          # uA -> mA
         if batt_vol_mv is not None:
             batt_vol_mv = batt_vol_mv / 1000.0          # uV -> mV
         temp_raw = num(battery.get("temp", {}).get("value", ""))
@@ -683,7 +897,12 @@ class Sampler(threading.Thread):
         vout = wls.get("vout")
         iout = wls.get("iout")
         input_power = (vout * iout / 1e6) if vout is not None and iout is not None else None
-        battery_power = (abs(batt_cur_ma) * batt_vol_mv / 1e6) if batt_cur_ma is not None and batt_vol_mv is not None else None
+        # 电池功率保留正负号（充电为正、放电为负）
+        battery_power = (
+            batt_cur_ma * batt_vol_mv / 1e6
+            if batt_cur_ma is not None and batt_vol_mv is not None
+            else None
+        )
 
         derived = {
             "vout": vout, "vrect": wls.get("vrect"), "iout": iout,
@@ -704,13 +923,37 @@ class Sampler(threading.Thread):
                 "ok": item.get("ok", False),
             })
 
+        # real_type 状态化：Unknown 在放电/未充电时是正常的，不当作采集失败
+        for n in node_list:
+            if n["id"] != "real_type":
+                continue
+            v = n.get("value", "")
+            if v.lower() in ("unknown", ""):
+                if batt_status.lower() in ("discharging", "not charging"):
+                    n["value"] = "未连接（放电中）"
+                    n["ok"] = True
+                elif batt_status.lower() == "charging":
+                    n["value"] = "未识别（充电中）"
+                    n["ok"] = True
+            break
+
         return {
             "ts": ts,
             "iso": now_iso(),
             "nodes": node_list,
             "battery": battery,
             "derived": derived,
-            "meta": {"interval": self.interval, "adb": getattr(self.adb, "serial", None) or ""},
+            "meta": {
+                "interval": self.fast_interval,
+                "fast_interval": self.fast_interval,
+                "logs_interval": self.logs_interval,
+                "logs_updated_at": int(self.logs_updated_at),
+                "logs_stale": self.logs_stale,
+                "adb": getattr(self.adb, "serial", None) or "",
+                "source": "adb",
+                "device": getattr(self.adb, "serial", None) or "",
+                "schema_version": 2,
+            },
         }
 
 
@@ -768,7 +1011,9 @@ def main():
     parser.add_argument("--adb", default="auto",
                         help="adb executable or folder (default: auto-detect C:\\adb or PATH)")
     parser.add_argument("--interval", type=float, default=3.0,
-                        help="sample/refresh interval in seconds (default 3)")
+                        help="fast sample/refresh interval in seconds (default 3)")
+    parser.add_argument("--logs-interval", type=float, default=20.0,
+                        help="vote/session log interval in seconds (default 20)")
     parser.add_argument("--port", type=int, default=8765, help="HTTP port (default 8765)")
     parser.add_argument("--open", action="store_true", help="open the page in the default browser")
     args = parser.parse_args()
@@ -783,12 +1028,14 @@ def main():
     adb = AdbReader(args.adb_host, args.serial, args.adb)
     if not adb.available:
         print(f"[warn] ADB device unavailable ({adb.last_error}); page will show offline state.")
-    sampler = Sampler(adb, args.interval)
+    sampler = Sampler(adb, args.interval, args.logs_interval)
     sampler.start()
 
     server = DashboardServer(("127.0.0.1", args.port), sampler, index_html)
     url = f"http://127.0.0.1:{args.port}/"
-    print(f"[ok] dashboard running: {url}  (interval={args.interval}s, adb={adb.adb_bin or 'not found'})")
+    print(f"[ok] dashboard running: {url}  "
+          f"(fast={args.interval}s, logs={args.logs_interval}s, "
+          f"adb={adb.adb_bin or 'not found'})")
     if args.open:
         import webbrowser
         webbrowser.open(url)
