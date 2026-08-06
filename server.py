@@ -36,6 +36,37 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 BASE_SYSFS = "/sys/devices/platform/soc/"
 BATTERY_UEVENT = "/sys/class/power_supply/battery/uevent"
 MCA_LOG_DIR = "/data/vendor/bsplog/charge/charge_logger/mca_log"
+THERMAL_DUMP = "/data/vendor/thermal/thermal.dump"
+
+# thermal-*.conf 无线监控段名前缀 -> 场景（来自设备解密配置）
+THERMAL_SCENES = {
+    "MONITOR-WIRELESS": "normal（日常）",
+    "CHARGE-MONITOR-WIRELESS": "charge（充电中）",
+    "CHG-ONLY-MONITOR-WIRELESS": "chg-only（熄屏充电）",
+    "4K-MONITOR-WIRELESS": "4k（4K 录像）",
+    "ARVR-MONITOR-WIRELESS": "arvr（AR/VR）",
+    "CAMERA-MONITOR-WIRELESS": "camera（相机）",
+    "CCLASSVIDEO-MONITOR-WIRELESS": "cclassvideo（连续视频）",
+    "CGAME-MONITOR-WIRELESS": "cgame（连续游戏）",
+    "CLASS0-MONITOR-WIRELESS": "class0",
+    "DANMU-MONITOR-WIRELESS": "danmu（弹幕）",
+    "HIGHFPS-MONITOR-WIRELESS": "highfps（高帧率）",
+    "HP-GAME-MONITOR-WIRELESS": "hp-mgame（高性能游戏）",
+    "HP-NORMAL-MONITOR-WIRELESS": "hp-normal（高性能常规）",
+    "HUANJI-MONITOR-WIRELESS": "huanji（幻迹）",
+    "MGAME-MONITOR-WIRELESS": "mgame（中度游戏）",
+    "NAVIGATION-MONITOR-WIRELESS": "navigation（导航）",
+    "NOLIMITS-MONITOR-WIRELESS": "nolimits（无限制）",
+    "PER-CLASS0-MONITOR-WIRELESS": "per-class0（性能 Class0）",
+    "PER-NORMAL-MONITOR-WIRELESS": "per-normal（性能常规）",
+    "PER-VIDEO-MONITOR-WIRELESS": "per-video（性能视频）",
+    "PHONE-MONITOR-WIRELESS": "phone（通话）",
+    "TGAME-MONITOR-WIRELESS": "tgame（重度游戏）",
+    "VIDEO-MONITOR-WIRELESS": "video（视频）",
+    "VIDEOCHAT-MONITOR-WIRELESS": "videochat（视频通话）",
+    "XINGTIE-MONITOR-WIRELESS": "xingtie（星穹铁道）",
+    "YUANSHEN-MONITOR-WIRELESS": "yuanshen（原神）",
+}
 
 # Every live node collected from the device.  group/label are used by the
 # HTML page to render "all charging real-time data" in one page.
@@ -251,6 +282,19 @@ class AdbReader:
         except FileNotFoundError:
             return ""
 
+    def read_thermal_dump(self, tail_bytes: int = 65536) -> str:
+        """Tail the newest thermal.dump lines (mi_thermald live state)."""
+        if not self.available:
+            return ""
+        try:
+            code, out, _ = self._run(
+                ["shell", "su", "-c",
+                 f'"tail -c {tail_bytes} {THERMAL_DUMP} | grep -a -E \'MONITOR-WIRELESS\' | tail -n 3"'],
+                timeout=15)
+            return out if code == 0 else ""
+        except FileNotFoundError:
+            return ""
+
     @staticmethod
     def _split_output(out: str, count: int) -> dict[str, dict]:
         blocks: dict[int, str] = {}
@@ -385,6 +429,27 @@ def parse_epp_status(text: str) -> str | None:
     return last
 
 
+THERMAL_WIRELESS_RE = re.compile(
+    r"\[([A-Z0-9\-]*MONITOR-WIRELESS)\]\[VIRTUAL-SENSOR-FORMULA (\d+)\]")
+THERMAL_TARGET_RE = re.compile(r"\[wireless_charge (\d+)\]")
+
+
+def parse_thermal_dump(text: str) -> dict:
+    """Parse mi_thermald live state: scene, virtual temp, wireless target."""
+    result: dict = {"scene": None, "virtual_temp": None, "target": None}
+    for line in text.splitlines():
+        m = THERMAL_WIRELESS_RE.search(line)
+        if not m:
+            continue
+        seg = m.group(1)
+        result["scene"] = THERMAL_SCENES.get(seg, seg)
+        result["virtual_temp"] = int(m.group(2)) / 1000.0
+        t = THERMAL_TARGET_RE.search(line)
+        if t:
+            result["target"] = int(t.group(1))
+    return result
+
+
 def classify_session_line(line: str):
     """Map an mca_log line to (kind, label, detail) or None."""
     if "wireless power_good_off" in line:
@@ -514,6 +579,7 @@ class Sampler(threading.Thread):
             "ts": time.time(), "iso": now_iso(), "mode": "offline",
             "connected": False, "error": msg, "nodes": [],
             "battery": {}, "derived": {}, "history": [], "voters": {}, "sessions": [],
+            "thermal": {},
             "meta": {"interval": self.interval},
         }
 
@@ -538,6 +604,7 @@ class Sampler(threading.Thread):
                 "id": "epp", "label": "EPP 协商状态", "group": "无线策略实时",
                 "unit": "", "fmt": "epp", "value": epp, "ok": True,
             })
+        parsed["thermal"] = parse_thermal_dump(self.adb.read_thermal_dump())
 
         with self.lock:
             sample = {

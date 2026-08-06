@@ -499,6 +499,13 @@ function renderVoters(d) {
   addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
   addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
   addSummary("无线快充禁用", effectiveOf(topics.wls_quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
+  const th = d.thermal || {};
+  if (th.scene) {
+    summary.push(`<span class="chip" title="mi_thermald 当前加载的 thermal 场景">生效场景<b>${esc(th.scene)}</b></span>`);
+  }
+  if (th.virtual_temp !== null && th.virtual_temp !== undefined) {
+    summary.push(`<span class="chip" title="VIRTUAL-SENSOR-FORMULA 加权虚拟温度（无线热控判据）">虚拟温度<b>${fmt(th.virtual_temp, 1)}</b><small>°C</small></span>`);
+  }
   if (d.derived && d.derived.temp_c !== null && d.derived.temp_c !== undefined) {
     summary.push(`<span class="chip">电池温度<b>${fmt(d.derived.temp_c, 1)}</b><small>°C</small></span>`);
   }
