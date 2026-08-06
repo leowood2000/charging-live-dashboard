@@ -478,6 +478,10 @@ function renderVoters(d) {
 
   const effectiveOf = b => {
     if (!b) return null;
+    // 驱动实测 icl（wireless loop）优先：投票最小值可能包含模式专属票（如 wireless_qc）
+    if (b.icl !== undefined && b.icl !== null) {
+      return { client: "wireless loop icl", value: b.icl, calc: false, source: "icl" };
+    }
     if (b.result) return { client: b.result.client, value: b.result.value, calc: false };
     if (b.unit === "mA") {
       const enabled = (b.rows || []).filter(r => r.enable === 1);
@@ -491,8 +495,10 @@ function renderVoters(d) {
   const summary = [];
   const addSummary = (label, eff, fmt) => {
     if (!eff) return;
-    summary.push(`<span class="chip" title="${eff.calc ? "驱动未输出 effective 行，按启用投票取最小值推算" : "驱动 effective 仲裁结果"}">` +
-      `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : ""}</small></span>`);
+    const srcTip = eff.source === "icl" ? "驱动 wireless loop 实测 icl" :
+      eff.calc ? "驱动未输出 effective 行，按启用投票取最小值推算" : "驱动 effective 仲裁结果";
+    summary.push(`<span class="chip" title="${srcTip}">` +
+      `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : eff.source === "icl" ? " · 实测" : ""}</small></span>`);
   };
   addSummary("无线输入限流", effectiveOf(topics.wireless_buck_input), v => `${v}mA`);
   addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
@@ -536,6 +542,8 @@ function renderVoters(d) {
     let resultText = "";
     if (b.result) {
       resultText = `<span class="vote-result">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}</span>`;
+    } else if (b.icl !== undefined && b.icl !== null) {
+      resultText = `<span class="vote-result" title="驱动 wireless loop 实测 icl">驱动实测 <b>${b.icl}</b>${b.unit || "mA"}</span>`;
     } else if (b.unit === "mA" && rows.length) {
       const enabled = rows.filter(r => r.enable === 1);
       if (enabled.length) {

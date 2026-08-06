@@ -264,7 +264,8 @@ class AdbReader:
             return ""
         pattern = ("power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|"
                    "FAST_CHARGE|fast chg success|set chg current|open path ibus|"
-                   "smartchg_soc_limit_callback|strategy_wireless_get_qc_enable")
+                   "smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|"
+                   "strategy_wireless_get_charging_info")
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)
@@ -426,6 +427,16 @@ def parse_epp_status(text: str) -> str | None:
         m = re.search(r"\bepp:(\d)", line)
         if m:
             last = m.group(1)
+    return last
+
+
+def parse_wls_icl(text: str) -> int | None:
+    """Extract the latest wireless loop icl (driver-applied wireless input limit)."""
+    last = None
+    for line in text.splitlines():
+        m = re.search(r"wireless loop: icl:(\d+)", line)
+        if m:
+            last = int(m.group(1))
     return last
 
 
@@ -604,6 +615,9 @@ class Sampler(threading.Thread):
                 "id": "epp", "label": "EPP 协商状态", "group": "无线策略实时",
                 "unit": "", "fmt": "epp", "value": epp, "ok": True,
             })
+        icl = parse_wls_icl(session_log)
+        if icl is not None and "wireless_buck_input" in parsed["voters"]:
+            parsed["voters"]["wireless_buck_input"]["icl"] = icl
         parsed["thermal"] = parse_thermal_dump(self.adb.read_thermal_dump())
 
         with self.lock:
