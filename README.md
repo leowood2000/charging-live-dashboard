@@ -25,6 +25,10 @@
 
 ![详情与曲线](docs/screenshot-detail.png)
 
+电流仲裁实时表（总仲裁结果、MCA effective / 实际下发 ICL / 实时 iout 分开展示）：
+
+![电流仲裁实时表](docs/screenshot-arbitration.png)
+
 实时会话档案：
 
 ![会话档案](docs/screenshot-sessions.png)
