@@ -133,10 +133,14 @@ class AdbReader:
                     return found
         return None
 
-    def _run(self, args: list[str], timeout: float = 10.0):
+    def _run(self, args: list[str], timeout: float = 10.0, with_serial: bool = True):
         if not self.adb_bin:
             return -1, "", "no adb binary"
-        return run_cmd([self.adb_bin, *args], timeout=timeout)
+        cmd = [self.adb_bin]
+        if with_serial and self.serial:
+            cmd += ["-s", self.serial]
+        cmd += args
+        return run_cmd(cmd, timeout=timeout)
 
     def _get_utc_offset(self) -> int:
         """Device UTC offset in minutes, e.g. +08:00 -> 480. 0 on failure."""
@@ -157,8 +161,8 @@ class AdbReader:
             return
         try:
             if self.adb_host:
-                self._run(["connect", self.adb_host], timeout=5)
-            code, out, _ = self._run(["devices"], timeout=5)
+                self._run(["connect", self.adb_host], timeout=5, with_serial=False)
+            code, out, _ = self._run(["devices"], timeout=5, with_serial=False)
             if code != 0:
                 self.last_error = "adb devices failed"
                 return
@@ -229,7 +233,7 @@ class AdbReader:
             return ""
         pattern = ("power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|"
                    "FAST_CHARGE|fast chg success|set chg current|open path ibus|"
-                   "smartchg_soc_limit_callback")
+                   "smartchg_soc_limit_callback|strategy_wireless_get_qc_enable")
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)
@@ -296,6 +300,7 @@ def num(raw: str) -> float | None:
 
 VOTE_TIME_RE = re.compile(r"\[(\d{2}:\d{2}:\d{2}:\d{3})")
 VOTE_CHANGED_RE = re.compile(r"mca_vote:\d+ (\w+): ([A-Za-z0-9_.]+),(\d+) voting on of val=(-?\d+)")
+VOTE_RESULT_RE = re.compile(r"mca_vote:\d+ (\w+): effective vote is now (-?\d+) voted by ([A-Za-z0-9_.]+),(\d+)")
 VOTE_HEADER_RE = re.compile(r"mca_vote:\d+ (\w+) VOTER:")
 VOTE_ROW_RE = re.compile(r"(\d+)\.([A-Za-z0-9_.]+)\s+(\d+)\s+(-?\d+)")
 VOTE_UNITS = {
@@ -321,12 +326,20 @@ def parse_vote_blocks(text: str, offset_minutes: int = 0) -> dict:
     blocks: dict[str, dict] = {}
     current: dict | None = None
     pending_changed: dict | None = None
+    pending_result: dict | None = None
     for line in text.splitlines():
         m = VOTE_CHANGED_RE.search(line)
         if m:
             pending_changed = {
                 "topic": m.group(1), "client": m.group(2),
                 "idx": int(m.group(3)), "value": int(m.group(4)),
+            }
+            continue
+        m = VOTE_RESULT_RE.search(line)
+        if m:
+            pending_result = {
+                "topic": m.group(1), "value": int(m.group(2)),
+                "client": m.group(3), "idx": int(m.group(4)),
             }
             continue
         m = VOTE_HEADER_RE.search(line)
@@ -338,10 +351,12 @@ def parse_vote_blocks(text: str, offset_minutes: int = 0) -> dict:
                 "time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
                 "unit": VOTE_UNITS.get(topic, "mA"),
                 "changed": pending_changed if pending_changed and pending_changed["topic"] == topic else None,
+                "result": pending_result if pending_result and pending_result["topic"] == topic else None,
                 "rows": [],
             }
             blocks[topic] = current
             pending_changed = None
+            pending_result = None
             continue
         if current is not None:
             m = VOTE_ROW_RE.search(line)
@@ -358,6 +373,16 @@ def _log_seconds(time_str: str) -> int:
     if not m:
         return 0
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+
+
+def parse_epp_status(text: str) -> str | None:
+    """Extract the latest EPP negotiation flag (epp:0/1) from mca_log lines."""
+    last = None
+    for line in text.splitlines():
+        m = re.search(r"\bepp:(\d)", line)
+        if m:
+            last = m.group(1)
+    return last
 
 
 def classify_session_line(line: str):
@@ -505,8 +530,14 @@ class Sampler(threading.Thread):
         parsed["connected"] = True
         parsed["voters"] = parse_vote_blocks(
             self.adb.read_vote_logs(), self.adb.utc_offset_minutes)
-        parsed["sessions"] = parse_sessions(
-            self.adb.read_session_logs(), self.adb.utc_offset_minutes)
+        session_log = self.adb.read_session_logs()
+        parsed["sessions"] = parse_sessions(session_log, self.adb.utc_offset_minutes)
+        epp = parse_epp_status(session_log)
+        if epp is not None:
+            parsed["nodes"].append({
+                "id": "epp", "label": "EPP 协商状态", "group": "无线策略实时",
+                "unit": "", "fmt": "epp", "value": epp, "ok": True,
+            })
 
         with self.lock:
             sample = {

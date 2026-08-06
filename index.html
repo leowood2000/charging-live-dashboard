@@ -193,6 +193,21 @@
   }
   .vote-head b { color: var(--cyan); }
   .vote-head small { color: var(--muted); }
+  .vote-head .vote-result {
+    color: var(--cyan);
+    border: 1px solid rgba(34,211,238,.35);
+    background: rgba(34,211,238,.08);
+    border-radius: 999px;
+    padding: 2px 9px;
+    font-size: 12px;
+  }
+  .vote-head .vote-result b { color: var(--text); }
+  .vote-head .vote-result.calc {
+    color: var(--amber);
+    border-color: rgba(251,191,36,.45);
+    background: rgba(251,191,36,.08);
+  }
+  .vote-head .vote-result.calc b { color: var(--amber); }
   .vote-chips { display: flex; flex-wrap: wrap; gap: 8px; }
   .vote-chip {
     display: inline-flex; align-items: center; gap: 6px;
@@ -230,7 +245,7 @@
   <header>
     <div>
       <h1>K80 Pro 无线充电实时仪表盘</h1>
-      <div class="sub">Redmi K80 Pro（24122RKC7C / miro）· HyperOS · KernelSU root · 2026-08-03 实测档案</div>
+      <div class="sub">Redmi K80 Pro（24122RKC7C / miro）· HyperOS · KernelSU root · 实时档案</div>
     </div>
     <span class="status" id="statusBadge"><span class="dot" id="statusDot"></span><span id="statusText">连接中…</span></span>
     <div class="spacer"></div>
@@ -270,66 +285,6 @@
   <div class="section-title">实时会话档案 <span class="badge">mca_log 最近会话 · 3 秒刷新</span></div>
   <section class="grid" id="liveSessions" aria-label="实时会话档案"></section>
 
-  <div class="section-title">实测会话档案（历史快照） <span class="badge">2026-08-03 22:53–22:55</span></div>
-  <p class="note" style="margin:-6px 0 12px">以下为 2026-08-03 分析文档的历史数据；最新会话见上方“实时会话档案”。</p>
-  <section class="grid">
-    <div class="card">
-      <h2>私有协议握手时间线<span class="tag">内核日志</span></h2>
-      <div id="timeline"></div>
-    </div>
-    <div class="card">
-      <h2>功率实测与限流<span class="tag">30W 档</span></h2>
-      <div class="kv" id="powerMeasured"></div>
-      <p class="note">协商上限 <b>30W</b>，但实测因 <b>wireless_thermal_30w</b> 热控把电池充电电流限制在 <b>3400mA</b>，未跑满。</p>
-    </div>
-    <div class="card">
-      <h2>私有协议要点<span class="tag">结论摘要</span></h2>
-      <div class="kv" id="protocolFacts"></div>
-    </div>
-    <div class="card">
-      <h2>硬件链路<span class="tag">RX = SC96281</span></h2>
-      <div class="chain" id="hardwareChain"></div>
-      <p class="note">私有协议 = 标准 Qi 基线 + 私有认证 + 发射端型号识别 + 电压/频率/功率协商；FOD 参数表即发射端“白名单”。</p>
-    </div>
-  </section>
-
-  <section class="grid">
-    <div class="card">
-      <h2>私有快充状态机<span class="tag">mca_quick_wireless</span></h2>
-      <div class="flow" id="stateMachine"></div>
-    </div>
-    <div class="card">
-      <h2>电流投票机制<span class="tag">历史快照 · mca_vote</span></h2>
-      <p class="note">各模块投票（限流取<b>最小值</b>，最严格者生效），由 <b>mca_vote</b> 汇总后下发硬件。实时投票表见上方“实时数据”区；下方为 2026-08-03 会话快照：</p>
-      <div id="voterTable"></div>
-      <p class="note">最终 <b>xm_wls_soc（SmartEndura）</b> 只投 375mA，无线输入被压到 <b>375mA</b>；`ichg_limit` 显示生效客户 <b>eff_client:wireless_thermal_30w 3400</b>。</p>
-    </div>
-  </section>
-
-  <section class="grid">
-    <div class="card">
-      <h2>发射端 FOD 白名单<span class="tag">mca_sc96281_fod_data</span></h2>
-      <div class="chips" id="fodWhitelist" style="justify-content:flex-start"></div>
-      <p class="note">每个型号对应一套 FOD（异物检测）参数与功率策略，这就是私有协议必须“认出”发射端型号的原因。</p>
-    </div>
-    <div class="card">
-      <h2>架构与源码可得性<span class="tag">闭源还原</span></h2>
-      <div class="kv" id="sourceFacts"></div>
-      <p class="note">MCA 驱动源码未随 OSS 发布，以上结构由 <b>/proc/kallsyms 符号表 + 内核日志 + 设备树</b>还原，函数名真实存在。</p>
-    </div>
-  </section>
-
-  <details>
-    <summary>内核驱动模块清单（/sys/module，实际加载）</summary>
-    <div class="mod-grid" id="moduleList"></div>
-  </details>
-
-  <details>
-    <summary>关键 sysfs 节点与读取命令</summary>
-    <div id="sysfsTable"></div>
-    <pre id="commandBlock"></pre>
-  </details>
-
   <details>
     <summary>原始数据 JSON（所有节点完整输出）</summary>
     <pre id="rawJson">等待数据…</pre>
@@ -337,129 +292,6 @@
 
 <script>
 "use strict";
-
-/* ================= 本次实测静态档案（来自深度分析文档） ================= */
-const SESSION = {
-  timeline: [
-    ["22:53:55", "充电板 power good", "wireless power_good_on，set chg current 4000"],
-    ["22:53:55", "私有协议尚未建立", "can't enable quick charge，force_vout_6v:0 epp:0 fc:0 qc_enable:0 pre_fastchg:0"],
-    ["22:54:00", "认证完成", "RX_INT_AUTHEN_FINISH，uuid_value = 0x09010907"],
-    ["22:54:00", "发射端识别", "POWER_SUPPLY_TX_ADAPTER=12（普通 Qi 板为 8），vout 从 6V 跳到 10.9V"],
-    ["22:54:04", "快充协商成功", "RX_INT_FAST_CHARGE，fast chg success:16，quick_charge_type=4，power_max=30"],
-    ["22:54:04", "电流限制下发", "set chg current 3400（client：wireless_thermal_30w）"],
-    ["22:54:11", "打开快充路径", "open path ibus 37 → 515 → 558 → 545 → 541"],
-    ["22:54:13–28", "电池电流爬升", "-1755 → -2333 → -2405 → -2476 → -2611 → -2694 → -2799 → -2923 → -2972 → -3079 mA"],
-    ["22:55:25", "CV 阈值步进", "vbatt_th decline 2mv，vbat_th=4068"],
-    ["22:55:35", "SmartEndura 介入", "smartchg_soc_limit_callback effective_result:1，电流压到 0（夜间充电保护）"],
-  ],
-  power: [
-    ["协商上限", "power_max = 30 W"],
-    ["接收端典型值", "vout ≈ 8.2V，iout ≈ 1.8–2.1A（约 15–17W）"],
-    ["电池端峰值", "约 4.0A × 4.0V ≈ 16W（受限流/温控影响）"],
-    ["限流来源", "buck eff_client:wireless_thermal_30w 3400"],
-    ["认证 UUID", "0x09010907"],
-    ["发射端型号", "TX_ADAPTER = 12（30W 档）"],
-  ],
-  facts: [
-    ["无线快充", "不是标准 Qi，而是小米私有协议（MCA 驱动）"],
-    ["接收端芯片", "SC96281（南芯，I2C 连接）"],
-    ["快充类型", "quick_charge_type = 4"],
-    ["快充成功标志", "wls_fc_flag = 16"],
-    ["无线芯片固件", "00.00.1e"],
-    ["电芯结构", "单电芯 6000mAh（金沙江硅碳电池，主/从双 BTB 接口）"],
-    ["FOD 参数节点", "mca_sc96281_fod_data / mca_nu1652_fod_data（双 RX 支持）"],
-    ["用户态 HAL", "vendor.xiaomi.hardware.micharge IMiCharge/default（running）"],
-    ["SmartEndura", "vendor.xiaomi.hardware.batteryantiaging（智能充电保护）"],
-  ],
-  chain: [
-    ["小米私有无线充电板", "TX"],
-    ["SC96281 无线接收芯片", "vout/vrect/iout/auth/fw"],
-    ["MCA 策略层", "basic/quick_wireless"],
-    ["Buck/Charge Pump", "mca_strategy_buckchg / platform_cp"],
-    ["单电芯电池", "O11U_6000mah_120w（双 BTB 大电流接口）"],
-  ],
-  stateMachine: [
-    ["Idle", "待机"],
-    ["检测无线板", "BPP/EPP 基线"],
-    ["私有认证", "AUTHEN_FINISH + UUID"],
-    ["识别 TX", "查表得功率档"],
-    ["电压爬升", "6V → 8/11V"],
-    ["FAST_CHARGE", "wls_fc_flag=16"],
-    ["打开 CP 路径", "ibus 爬升"],
-    ["电流爬升", "受热控/SoC限制"],
-    ["CV/充满", "SmartEndura 暂停"],
-  ],
-  voters: [
-    ["0.xm_wls", "1", "1300"],
-    ["3.xm_wls_soc", "1", "375"],
-    ["4.wireless_thermal_bpp", "0", "0"],
-    ["5.wireless_thermal_bppqc2", "0", "0"],
-    ["6.wireless_thermal_bppqc3", "0", "0"],
-    ["7.wireless_thermal_epp", "0", "0"],
-    ["8.wireless_qc", "0", "0"],
-    ["9.xm_wls_67w", "0", "0"],
-    ["10.xm_wls_qvalue", "0", "0"],
-    ["11.xm_wls_phone", "0", "0"],
-  ],
-  fod: ["白色立式 30W", "紫米 20W", "紫米 30W", "紫米 50W", "紫米车载 20W", "紫米车载 30W", "紫米车载 50W",
-        "移动电源无线 20W", "移动电源 30W", "Redmi 圆盘 30W", "M2 50W", "L2 50W", "K1 80W", "K8 100W",
-        "J1S 55W", "双线圈 30W", "磁吸 30W", "低感量 80W"],
-  modules: {
-    "平台抽象": ["mca_platform_base", "mca_platform_wireless_class", "mca_platform_cp_class",
-               "mca_platform_buckchg_class", "mca_platform_bc12_class", "mca_platform_loadsw_class",
-               "mca_platform_fg_ic_ops"],
-    "协议层": ["mca_protocol_class", "mca_protocol_pd_class", "mca_protocol_qc_class",
-             "mca_qcom_pd_protocol", "mca_pd_auth"],
-    "策略层": ["mca_strategy_class", "mca_basic_wireless", "mca_quick_wireless",
-             "mca_strategy_quickchg", "mca_strategy_buckchg", "mca_strategy_fg_class", "mca_strategy_fg_comp"],
-    "业务层": ["mca_business_battery_comp", "mca_business_charger_comp", "mca_business_misc_comp"],
-    "公共设施": ["mca_common", "mca_event", "mca_log", "mca_parse_dts", "mca_sysfs", "mca_workqueue",
-              "mca_charge_interface", "mca_charge_mievent", "mca_charger_thermal", "mca_smart_charge",
-              "mca_soc_limit", "mca_path_control", "mca_vbat_ovp_monitor", "mca_bmd",
-              "mca_connector_antiburn", "mca_hwid", "mca_lpd_detect", "mca_qcom_sysfs",
-              "mca_qcom_smem", "mca_qcom_subpmic_proxy", "mca_wireless_revchg"],
-    "芯片驱动": ["sc96281_comp（无线 RX）", "charger_partition", "charger_ulog_glink", "mca_adsp_glink"],
-  },
-  sysfs: [
-    ["soc:mca_business_charger/quick_charge_type", "私有快充类型（实测 4）"],
-    ["soc:mca_business_charger/real_type", "真实协议名（Unknown）"],
-    ["soc:mca_business_charger/power_max", "协商最大功率（30W）"],
-    ["soc:mca_strategy_basic_wireless_class/wls_debug", "实时无线参数 vout/vrect/iout"],
-    ["soc:mca_strategy_basic_wireless_class/wls_fc_flag", "快充成功标志（16）"],
-    ["soc:mca_charge_interface/ichg_limit", "电流投票结果（eff_client + mA）"],
-    ["soc:mca_charge_interface/charge_enable", "充电使能投票"],
-    ["soc:mca_platform_cp/ibus_total / ibus_delta", "电荷泵总线电流"],
-    ["soc:mca_bmd/btb_master_status", "主/从 BTB 状态（单电芯双接口）"],
-    ["soc:mca_charger_thermal/wireless_chg_curr", "无线热控限流"],
-    ["soc:mca_strategy_wireless_revchg_class/wireless_chip_fw", "无线芯片固件"],
-    ["/sys/class/power_supply/battery/uevent", "电池标准属性（电流/电压/SOC/温度/循环）"],
-  ],
-  source: [
-    ["官方内核分支", "MiCode/Xiaomi_Kernel_OpenSource bsp-miro-v-oss（公开）"],
-    ["MCA 驱动源码", "仓库内软链接指向 vendor/xiaomi/proprietary/mca（未公开）"],
-    ["K80 Pro 设备树", "xiaomi-smxxx0-devs/kernel_xiaomi_sm8750-devicetrees（公开）"],
-    ["驱动运行符号", "设备 /proc/kallsyms（需 root，本机可读）"],
-  ],
-  commands: `# 1) 连接设备（ADB over Wi-Fi，需 root）
-adb connect 192.168.5.13:5555
-
-# 2) 实时采样（每 2 秒一次，30 次）
-adb shell 'su -c "for i in $(seq 1 30); do
-  cat /sys/devices/platform/soc/soc:mca_business_charger/quick_charge_type
-  cat /sys/devices/platform/soc/soc:mca_business_charger/power_max
-  cat /sys/devices/platform/soc/soc:mca_strategy_basic_wireless_class/wls_debug
-  cat /sys/class/power_supply/battery/current_now
-  cat /sys/class/power_supply/battery/voltage_now
-  sleep 2
-done"'
-
-# 3) 抓握手日志（插拔充电板后立即执行）
-adb shell 'su -c "dmesg | grep -E \\"AUTHEN|FAST_CHARGE|TX_ADAPTER|open_path|wireless loop\\" | tail -n 200"'
-
-# 4) 符号表（驱动结构）
-adb shell 'su -c "grep mca_basic_wireless /proc/kallsyms"'
-adb shell 'su -c "grep sc96281 /proc/kallsyms"'`,
-};
 
 const CHIP_FACTS = [
   ["无线接收芯片", "SC96281（南芯）"],
@@ -537,45 +369,6 @@ function setStatus(mode, text) {
   $("statusText").textContent = text;
 }
 
-/* ---------- 静态档案渲染 ---------- */
-function renderStatic() {
-  $("timeline").innerHTML = `<table><thead><tr><th>时间</th><th>事件</th><th>日志 / 数值</th></tr></thead><tbody>` +
-    SESSION.timeline.map(r => `<tr><td class="time">${r[0]}</td><td>${esc(r[1])}</td><td class="mono">${esc(r[2])}</td></tr>`).join("") +
-    `</tbody></table>`;
-
-  $("powerMeasured").innerHTML = SESSION.power.map(r =>
-    `<div class="k">${esc(r[0])}</div><div class="v">${esc(r[1])}</div>`).join("");
-
-  $("protocolFacts").innerHTML = SESSION.facts.map(r =>
-    `<div class="k">${esc(r[0])}</div><div class="v">${esc(r[1])}</div>`).join("");
-
-  $("hardwareChain").innerHTML = SESSION.chain.map((n, i) =>
-    (i ? `<span class="arrow">▸</span>` : "") +
-    `<div class="node"><b>${esc(n[0])}</b><small>${esc(n[1])}</small></div>`).join("");
-
-  $("stateMachine").innerHTML = SESSION.stateMachine.map((s, i) =>
-    (i ? `<span class="arrow">→</span>` : "") +
-    `<div class="step"><b>${esc(s[0])}</b><small>${esc(s[1])}</small></div>`).join("");
-
-  $("voterTable").innerHTML = `<table><thead><tr><th>投票者</th><th>生效</th><th>值(mA)</th></tr></thead><tbody>` +
-    SESSION.voters.map(v => `<tr><td class="mono">${v[0]}</td><td>${v[1]}</td><td>${v[2]}</td></tr>`).join("") +
-    `</tbody></table>`;
-
-  $("fodWhitelist").innerHTML = SESSION.fod.map(f => `<span class="chip">${esc(f)}</span>`).join("");
-
-  $("sourceFacts").innerHTML = SESSION.source.map(r =>
-    `<div class="k">${esc(r[0])}</div><div class="v">${esc(r[1])}</div>`).join("");
-
-  $("moduleList").innerHTML = Object.entries(SESSION.modules).map(([g, list]) =>
-    `<div><h4>${esc(g)}</h4><ul>${list.map(m => `<li>${esc(m)}</li>`).join("")}</ul></div>`).join("");
-
-  $("sysfsTable").innerHTML = `<table><thead><tr><th>节点</th><th>含义</th></tr></thead><tbody>` +
-    SESSION.sysfs.map(r => `<tr><td class="mono">${esc(r[0])}</td><td>${esc(r[1])}</td></tr>`).join("") +
-    `</tbody></table>`;
-
-  $("commandBlock").textContent = SESSION.commands;
-}
-
 /* ---------- 实时渲染 ---------- */
 function renderOffline(data) {
   setStatus("offline", "设备离线");
@@ -626,6 +419,9 @@ function renderNode(node) {
       if (m.iout !== undefined) chips.push(`<span class="chip">iout<b>${m.iout}</b><small>mA</small></span>`);
       if (m.tx_adapter !== undefined) chips.push(`<span class="chip">TX<b>${m.tx_adapter}</b></span>`);
       body = `<div class="chips">${chips.join("")}</div>`;
+    } else if (node.fmt === "epp") {
+      const on = node.value === "1";
+      body = `<span class="${on ? "" : "bad"}">${on ? "已建立（EPP 协商成功）" : "未建立（仅 BPP）"}</span>`;
     } else if (node.fmt === "ichg") {
       body = `<span>${esc(node.value)}</span>`;
     } else if (node.fmt === "num") {
@@ -698,8 +494,18 @@ function renderVoters(d) {
     const changedText = b.changed
       ? ` · 最近变动 ${esc(b.changed.client)} → ${b.changed.value}`
       : "";
+    let resultText = "";
+    if (b.result) {
+      resultText = `<span class="vote-result">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}</span>`;
+    } else if (b.unit === "mA" && rows.length) {
+      const enabled = rows.filter(r => r.enable === 1);
+      if (enabled.length) {
+        const min = enabled.reduce((a, b) => b.value < a.value ? b : a);
+        resultText = `<span class="vote-result calc" title="驱动未输出 effective 行，按启用投票取最小值推算">计算生效 <b>${esc(min.client)}</b> → ${min.value}${b.unit}</span>`;
+      }
+    }
     return `<div class="card"><h2>${esc(t)}<span class="tag">生效 ${active}/${rows.length}</span></h2>` +
-      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small></div>` +
+      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}</div>` +
       `<div class="vote-chips">${chips}</div></div>`;
   }).join("");
   el.innerHTML = cards;
@@ -874,7 +680,6 @@ setInterval(() => {
   $("countdown").textContent = remain.toFixed(1) + "s";
 }, 250);
 
-renderStatic();
 load();
 </script>
 </body>
