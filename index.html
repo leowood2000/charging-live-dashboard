@@ -618,24 +618,32 @@ function renderVoters(d) {
   const mcaEff = effectiveOf(buck);
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;
-  addSummary("无线输入限流", mcaEff, v => `${v}mA`);
-  if (buck && buck.icl !== undefined && buck.icl !== null) {
-    const ago = buck.icl_at ? Math.max(0, Math.round((Date.now() - buck.icl_at) / 1000)) : null;
-    let diff = "";
-    if (mcaEff && mcaEff.value !== null && mcaEff.value !== undefined) {
-      diff = ` · Δ${buck.icl - mcaEff.value}mA`;
-    }
-    summary.push(`<span class="chip" title="驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）">` +
-      `实际下发 ICL<b>${buck.icl}</b><small>mA${ago !== null ? " · " + ago + "s前" : ""}${diff}</small></span>`);
-  }
-  if (ioutNow !== null) {
-    summary.push(`<span class="chip" title="wls_debug 实时输出电流">实时 iout<b>${fmt(ioutNow, 0)}</b><small>mA</small></span>`);
-  }
-  if (buck && buck.icl !== undefined && buck.icl !== null && ioutNow !== null &&
-      Math.abs(buck.icl - ioutNow) > 200) {
-    summary.push(`<span class="chip" style="color:var(--amber);border-color:rgba(251,191,36,.5)" ` +
-      `title="ICL 与实时 iout 相差超过 200mA，可能为旧日志或处于不同控制阶段">` +
-      `ICL 与 iout 不一致<b>Δ${Math.round(Math.abs(buck.icl - ioutNow))}</b><small>mA</small></span>`);
+  const vrectNow = d.derived && d.derived.vrect !== null && d.derived.vrect !== undefined
+    ? d.derived.vrect : null;
+  const vbatNow = d.derived && d.derived.batt_voltage_mv !== null && d.derived.batt_voltage_mv !== undefined
+    ? d.derived.batt_voltage_mv : null;
+  // 物理一致性：icl 是无线 buck 输入侧限流，输出 iout 上限 ≈ icl × vrect / vbat
+  const iclNotEffective = (icl, iout) => {
+    if (icl === null || icl === undefined || iout === null || iout === undefined) return false;
+    if (!vrectNow || !vbatNow || vbatNow <= 0) return Math.abs(icl - iout) > 200;
+    const expectMax = icl * vrectNow / vbatNow;
+    return iout > expectMax * 1.25 + 50;
+  };
+  const iclBad = buck && buck.icl !== undefined && buck.icl !== null
+    ? iclNotEffective(buck.icl, ioutNow) : false;
+  // 总仲裁只显示“实际结果”：仲裁值未生效时，改用真正约束电流的限流（quick_wireless cur_max / buck_fcc）
+  const wlsEff = mcaEff && iclBad && buck && buck.actual_limit !== undefined && buck.actual_limit !== null
+    ? { client: buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc",
+        value: buck.actual_limit, calc: false, replaced: true }
+    : mcaEff;
+  if (wlsEff) {
+    const tip = wlsEff.replaced
+      ? "驱动仲裁值未实际生效，显示当前真正约束电流的限流（quick_wireless cur_max / buck_fcc）"
+      : (wlsEff.calc
+          ? "驱动未输出 effective 行，按已核实 policy 推算"
+          : "驱动 effective vote is now 仲裁结果");
+    summary.push(`<span class="chip" title="${tip}">` +
+      `无线输入限流<b>${wlsEff.value}</b><small>${esc(wlsEff.client)}${wlsEff.calc ? " · 推算" : ""}</small></span>`);
   }
   addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
   addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
@@ -695,7 +703,9 @@ function renderVoters(d) {
       let diff = "";
       if (b.result) diff = ` · Δ${b.icl - b.result.value}mA`;
       iclText = `<span class="vote-result" title="驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）">实际下发 ICL <b>${b.icl}</b>mA` +
-        `<small>${b.icl_time ? esc(b.icl_time) + " " : ""}${ago !== null ? ago + "s前" : ""}${diff}</small></span>`;
+        `<small>${b.icl_time ? esc(b.icl_time) + " " : ""}${ago !== null ? ago + "s前" : ""}${diff}` +
+        (iclBad ? ` <span style="color:var(--amber);border:1px solid rgba(251,191,36,.5);border-radius:4px;padding:0 4px">限流未生效</span>` : "") +
+        `</small></span>`;
     }
     let ioutText = "";
     if (t === "wireless_buck_input" && ioutNow !== null) {

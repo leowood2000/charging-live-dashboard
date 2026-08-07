@@ -298,7 +298,8 @@ class AdbReader:
         pattern = ("power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|"
                    "FAST_CHARGE|fast chg success|set chg current|open path ibus|"
                    "smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|"
-                   "strategy_wireless_get_charging_info")
+                   "strategy_wireless_get_charging_info|"
+                   "mca_wireless_quick_charge_select_max_ibat")
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)
@@ -561,6 +562,22 @@ def parse_wls_icl(text: str, offset_minutes: int = 0) -> tuple[int, str] | None:
     return last
 
 
+def parse_quick_cur_max(text: str) -> int | None:
+    """Latest quick wireless battery current target cur_max:[Final] (mA)."""
+    last = None
+    for m in re.finditer(r"cur_max:\[Final\]: (\d+)", text):
+        last = int(m.group(1))
+    return last
+
+
+def parse_buck_fcc(text: str) -> int | None:
+    """Latest wireless loop buck_fcc (battery-side FCC cap, mA)."""
+    last = None
+    for m in re.finditer(r"wireless loop: icl:\d+, buck_fcc:(\d+)", text):
+        last = int(m.group(1))
+    return last
+
+
 def is_last_wireless_power_off(text: str) -> bool:
     """True if the last wireless power event is removal (power_good_off)."""
     return (
@@ -722,6 +739,9 @@ class Sampler:
         self.last_wls_icl_at: int | None = None
         self.last_wls_icl_log_time: str | None = None
         self.last_wls_icl_key: tuple[int, str] | None = None
+        # quick wireless 最终电池电流目标（CP 快充路径真正约束电流的值），cur_max 缺失时回退 buck_fcc
+        self.last_quick_cur_max: int | None = None
+        self.last_buck_fcc: int | None = None
 
     def start(self) -> None:
         threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
@@ -809,6 +829,8 @@ class Sampler:
                 self.last_wls_icl_log_time = None
                 self.last_wls_icl_key = None
                 self.last_epp = None
+                self.last_quick_cur_max = None
+                self.last_buck_fcc = None
             else:
                 icl = parse_wls_icl(session_log, self.adb.utc_offset_minutes)
                 if icl is not None:
@@ -820,6 +842,12 @@ class Sampler:
                         self.last_wls_icl = value
                         self.last_wls_icl_log_time = log_time
                         self.last_wls_icl_at = int(time.time() * 1000)
+                quick_cur_max = parse_quick_cur_max(session_log)
+                if quick_cur_max is not None:
+                    self.last_quick_cur_max = quick_cur_max
+                buck_fcc = parse_buck_fcc(session_log)
+                if buck_fcc is not None:
+                    self.last_buck_fcc = buck_fcc
 
         self.logs_stale = not vote_read_ok or not session_read_ok
         self.logs_updated_at = time.time() * 1000
@@ -851,6 +879,14 @@ class Sampler:
                 buck["icl"] = self.last_wls_icl
                 buck["icl_time"] = self.last_wls_icl_log_time or ""
                 buck["icl_at"] = self.last_wls_icl_at or 0
+        buck = core.get("voters", {}).get("wireless_buck_input")
+        if buck is not None:
+            actual = self.last_quick_cur_max if self.last_quick_cur_max is not None else self.last_buck_fcc
+            if actual is not None:
+                buck["actual_limit"] = actual
+                buck["actual_limit_source"] = (
+                    "quick_wireless cur_max" if self.last_quick_cur_max is not None
+                    else "wireless loop buck_fcc")
         meta = core.setdefault("meta", {})
         meta.update({
             "interval": self.fast_interval,
