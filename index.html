@@ -321,7 +321,7 @@
     </div>
   </section>
 
-  <div class="section-title">电流投票实时表 <span class="badge">全部主题 · 20 秒刷新</span>
+  <div class="section-title">电流投票实时表 <span class="badge">生效主题 · 20 秒刷新</span>
     <span id="logsStaleBadge" class="badge" style="display:none;color:var(--amber);border-color:rgba(251,191,36,.5)">日志读取失败 · 显示上次成功数据</span>
   </div>
   <section class="grid" id="voteTopics" aria-label="电流投票实时表"></section>
@@ -590,6 +590,17 @@ function renderVoters(d) {
       `<p class="note">日志中暂无投票表输出。</p></div>`;
     return;
   }
+  // 只显示与当前连接/状态相关的投票主题：有启用票，或驱动已给出实际投票结果
+  const relevant = keys.filter(t => {
+    const b = topics[t];
+    return (b.rows || []).some(r => r.enable === 1)
+        || (b.result && b.result.client && b.result.client !== "(null)");
+  });
+  if (!relevant.length) {
+    el.innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">生效主题</span></h2>` +
+      `<p class="note">当前无生效的投票主题（无线/有线未连接或全部票已撤）。</p></div>`;
+    return;
+  }
 
   const effectiveOf = b => {
     if (!b) return null;
@@ -668,8 +679,8 @@ function renderVoters(d) {
 
   const order = ["wireless_buck_input", "buck_charge_curr", "chg_enable",
                  "quick_chg_disable", "wls_quick_chg_disable"];
-  const sorted = order.filter(t => topics[t])
-    .concat(keys.filter(t => !order.includes(t)));
+  const sorted = order.filter(t => relevant.includes(t))
+    .concat(relevant.filter(t => !order.includes(t)));
   const cards = sorted.map(t => {
     const b = topics[t];
     const rows = b.rows || [];

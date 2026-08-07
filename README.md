@@ -8,6 +8,7 @@
 - **电流符号统一**：充电为正、放电为负，`Not charging` 也按放电处理；电池功率保留正负号；原始 JSON 仍保留内核原值方便排查
 - **MCA 仲裁移植**：支持 `voting on/off`、完整 client 字符集、单位白名单（未知主题不默认 mA）、已反汇编核实的 `VOTE_POLICIES`（MIN / FIRST_NONZERO / FIRST_ZERO / UNKNOWN）、按主题缓存 `changed`/`result`
 - **总仲裁只显示实际结果**：无线输入限流在仲裁值未生效（icl 与 iout 违反物理功率比）时，chip 改为“实际约束限流”并显示电池侧真正约束电流的限流（quick_wireless `cur_max:[Final]` / `buck_fcc`），不再误标为无线输入电流；ICL / iout 细节保留在投票详情卡
+- **投票区只显示生效主题**：有启用票或驱动已给出实际结果的主题才显示卡片，隐藏与当前设备无关的默认/全 0 投票卡
 - **仲裁展示分离**：`effective vote is now`（MCA 逻辑仲裁）、`wireless loop icl`（驱动实际下发限流）、`wls_debug iout`（实时输出电流）三组独立展示，ICL 与 iout 偏差超过 200mA 时提示“可能为旧日志或不同控制阶段”
 - **会话档案**：以 `power_good_on` 建立会话，`power_good_off` 记入“充电板移除”事件；保留全部电流变化与 open path 事件；最多 3 个会话、每个会话最多 100 条事件
 - **日志容错**：日志读取失败保留上次成功数据并标记 `logs_stale`；读取成功但 grep 无匹配不算失败
