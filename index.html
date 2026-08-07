@@ -590,8 +590,12 @@ function renderVoters(d) {
       `<p class="note">日志中暂无投票表输出。</p></div>`;
     return;
   }
+  // auth_20w/30w/50w/80w/voice_box/magnet 是按充电板型号预置的热控表，
+  // 无论连接哪台垫都会被热控客户端投票，不属于“当前设备”的仲裁结果，直接隐藏
+  const isDeviceModelTable = t => /^wireless_auth_/.test(t);
   // 只显示与当前连接/状态相关的投票主题：有启用票，或驱动已给出实际投票结果
   const relevant = keys.filter(t => {
+    if (isDeviceModelTable(t)) return false;
     const b = topics[t];
     return (b.rows || []).some(r => r.enable === 1)
         || (b.result && b.result.client && b.result.client !== "(null)");
