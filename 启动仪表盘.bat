@@ -2,6 +2,7 @@
 setlocal
 title 充电实时仪表盘
 cd /d "%~dp0"
+chcp 65001 >nul
 
 echo ============================================
 echo  充电实时仪表盘 启动脚本
@@ -15,7 +16,7 @@ timeout /t 1 /nobreak >nul
 
 REM 显示当前代码版本（git 短哈希）
 set "VER=dev"
-for /f "delims=" %%v in ('git -C "%~dp0" rev-parse --short HEAD 2^>nul') do set "VER=%%v"
+for /f "delims=" %%v in ('git rev-parse --short HEAD 2^>nul') do set "VER=%%v"
 echo [2/3] 当前代码版本: %VER%
 
 set "ADBARG="
