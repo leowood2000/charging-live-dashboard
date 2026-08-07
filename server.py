@@ -39,6 +39,23 @@ BATTERY_UEVENT = "/sys/class/power_supply/battery/uevent"
 MCA_LOG_DIR = "/data/vendor/bsplog/charge/charge_logger/mca_log"
 THERMAL_DUMP = "/data/vendor/thermal/thermal.dump"
 
+
+def _detect_version() -> str:
+    """Git short hash（启动时的版本标识），失败时返回 dev。"""
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(
+            ["git", "-C", base, "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=3)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return "dev"
+
+
+VERSION = _detect_version()
+
 # thermal-*.conf 无线监控段名前缀 -> 场景（来自设备解密配置）
 THERMAL_SCENES = {
     "MONITOR-WIRELESS": "normal（日常）",
@@ -894,6 +911,7 @@ class Sampler:
             "logs_interval": self.logs_interval,
             "logs_updated_at": int(self.logs_updated_at),
             "logs_stale": self.logs_stale,
+            "version": VERSION,
             "adb": getattr(self.adb, "serial", None) or "",
             "source": "adb",
             "device": getattr(self.adb, "serial", None) or "",
@@ -1063,11 +1081,14 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if self.path in ("/", "/index.html"):
-            index = self.server.index_html
-            if index is None:
+            # 每次请求实时读取，避免旧进程一直提供启动时的旧页面
+            index_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+            try:
+                with open(index_path, "r", encoding="utf-8") as fh:
+                    body = fh.read().encode("utf-8")
+            except OSError:
                 self.send_error(404, "index.html not found next to server.py")
                 return
-            body = index.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -1105,24 +1126,17 @@ def main():
     parser.add_argument("--open", action="store_true", help="open the page in the default browser")
     args = parser.parse_args()
 
-    base = os.path.dirname(os.path.abspath(__file__))
-    index_path = os.path.join(base, "index.html")
-    index_html = None
-    if os.path.isfile(index_path):
-        with open(index_path, "r", encoding="utf-8") as fh:
-            index_html = fh.read()
-
     adb = AdbReader(args.adb_host, args.serial, args.adb)
     if not adb.available:
         print(f"[warn] ADB device unavailable ({adb.last_error}); page will show offline state.")
     sampler = Sampler(adb, args.interval, args.logs_interval)
     sampler.start()
 
-    server = DashboardServer(("127.0.0.1", args.port), sampler, index_html)
+    server = DashboardServer(("127.0.0.1", args.port), sampler, None)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"[ok] dashboard running: {url}  "
           f"(fast={args.interval}s, logs={args.logs_interval}s, "
-          f"adb={adb.adb_bin or 'not found'})")
+          f"adb={adb.adb_bin or 'not found'}, version={VERSION})")
     if args.open:
         import webbrowser
         webbrowser.open(url)
