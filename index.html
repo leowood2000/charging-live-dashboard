@@ -638,12 +638,13 @@ function renderVoters(d) {
     : mcaEff;
   if (wlsEff) {
     const tip = wlsEff.replaced
-      ? "驱动仲裁值未实际生效，显示当前真正约束电流的限流（quick_wireless cur_max / buck_fcc）"
+      ? "无线输入限流仲裁值未实际生效，此处显示电池侧真正约束电流的限流（quick_wireless cur_max / buck_fcc），不是无线输入电流"
       : (wlsEff.calc
           ? "驱动未输出 effective 行，按已核实 policy 推算"
           : "驱动 effective vote is now 仲裁结果");
+    const wlsLabel = wlsEff.replaced ? "实际约束限流" : "无线输入限流";
     summary.push(`<span class="chip" title="${tip}">` +
-      `无线输入限流<b>${wlsEff.value}</b><small>${esc(wlsEff.client)}${wlsEff.calc ? " · 推算" : ""}</small></span>`);
+      `${wlsLabel}<b>${wlsEff.value}</b><small>${esc(wlsEff.client)}${wlsEff.calc ? " · 推算" : ""}</small></span>`);
   }
   addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
   addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
