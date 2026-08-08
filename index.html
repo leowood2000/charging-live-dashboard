@@ -543,6 +543,17 @@ function renderGroups(d) {
       const el = document.querySelector(`[data-wired="${key}"]`);
       if (el) el.innerHTML = wiredTileValue(key, d);
     });
+    const tagEl = $("wiredInputTag");
+    if (tagEl) {
+      const tel = (d && d.derived) || {};
+      const staleTip = tel.wired_input_stale ? "（数据暂时陈旧）" : "";
+      const waitTip = tel.wired_input_waiting ? " · 等待策略遥测" : "";
+      const ageTip = tel.wired_input_source
+        && tel.wired_input_source !== "usb_uevent"
+        && tel.wired_input_age !== null && tel.wired_input_age !== undefined
+        ? ` · ${tel.wired_input_age}s前` : "";
+      tagEl.textContent = `${srcText(tel.wired_input_source)}${waitTip}${ageTip}${staleTip}`;
+    }
   }
 }
 
@@ -610,7 +621,12 @@ function buildGroups(d) {
   if (wiredNow) {
     const tel = d.derived || {};
     const staleTip = tel.wired_input_stale ? "（数据暂时陈旧）" : "";
-    cards.unshift(`<div class="card"><h2>有线输入实时<span class="tag">${esc(srcText(tel.wired_input_source))}${staleTip}</span></h2>` +
+    const waitTip = tel.wired_input_waiting ? " · 等待策略遥测" : "";
+    const ageTip = tel.wired_input_source
+      && tel.wired_input_source !== "usb_uevent"
+      && tel.wired_input_age !== null && tel.wired_input_age !== undefined
+      ? ` · ${tel.wired_input_age}s前` : "";
+    cards.unshift(`<div class="card"><h2>有线输入实时<span class="tag" id="wiredInputTag">${esc(srcText(tel.wired_input_source))}${waitTip}${ageTip}${staleTip}</span></h2>` +
       `<div class="tiles"><div class="tile"><div class="k">有线输入电压<small>VBUS</small></div><div class="v" data-wired="vbus">${wiredTileValue("vbus", d)}</div></div>` +
       `<div class="tile"><div class="k">有线输入电流<small>IBUS</small></div><div class="v" data-wired="ibus">${wiredTileValue("ibus", d)}</div></div>` +
       `<div class="tile"><div class="k">有线输入功率<small>VBUS×IBUS</small></div><div class="v" data-wired="power">${wiredTileValue("power", d)}</div></div>` +
@@ -996,8 +1012,10 @@ function renderCharts(d) {
   const srcEl = $("chart-input-source");
   if (srcEl) {
     const src = d.derived && d.derived.input_source;
+    const wiredWaiting = d.derived && d.derived.wired_input_waiting;
     srcEl.textContent = src === "wired"
       ? "有线 · " + srcText(d.derived && d.derived.wired_input_source)
+        + (wiredWaiting ? " · 等待策略遥测" : "")
       : src === "wireless" ? "无线 · wls_debug" : "";
   }
   series.forEach(s => {

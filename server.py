@@ -876,6 +876,21 @@ def is_wired_disconnected(text: str) -> bool:
     return bool(re.search(r"real_type changed: \d+ => 0", last))
 
 
+def split_after_last_wired_boundary(text: str) -> str:
+    """只保留最后一次 usb online / real_type changed 边界之后的日志段。"""
+    lines = text.splitlines()
+    last = -1
+    for i, line in enumerate(lines):
+        if "usb online:" in line or "real_type changed:" in line:
+            last = i
+    return "\n".join(lines[last + 1:]) if last >= 0 else text
+
+
+def has_wired_boundary(text: str) -> bool:
+    return any("usb online:" in line or "real_type changed:" in line
+               for line in text.splitlines())
+
+
 def is_last_wireless_power_off(text: str) -> bool:
     """True if the last wireless power event is removal (power_good_off)."""
     return (
@@ -1056,6 +1071,8 @@ class Sampler:
         # 有线输入遥测缓存：CP 与 Buck 各留一份，按 wired_cp.state 选择来源
         self.last_wired_cp_tel: dict | None = None
         self.last_wired_buck_tel: dict | None = None
+        # 新会话/协议变化后尚无策略遥测：页面回退 USB uevent 并标记“等待策略遥测”
+        self.last_wired_tel_waiting = False
 
     def start(self) -> None:
         threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
@@ -1179,19 +1196,40 @@ class Sampler:
             state = parse_session_cp_state(pp_log, self.adb.utc_offset_minutes)
             w_cp_mode, w_cp_work_mode, w_decision, w_boundary = state["wireless"]
             d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary = state["wired"]
-            # 有线输入遥测：CP regulation 与 Buck status 各解析一份
+            # 有线输入遥测：只解析最后一次会话边界之后的日志段；
+            # 同一行（log_time/vbus/ibus）不刷新 at，避免旧值被伪装成刚刚采到；
+            # 新会话/协议变化后尚无遥测时清空缓存并标记等待，页面回退 USB uevent
             if is_wired_disconnected(pp_log):
                 self.last_wired_cp_tel = None
                 self.last_wired_buck_tel = None
+                self.last_wired_tel_waiting = False
             else:
+                tail = split_after_last_wired_boundary(pp_log)
                 cp_tel = parse_wired_cp_telemetry(
-                    pp_log, self.adb.utc_offset_minutes)
+                    tail, self.adb.utc_offset_minutes)
                 buck_tel = parse_wired_buck_telemetry(
-                    pp_log, self.adb.utc_offset_minutes)
-                if cp_tel is not None:
-                    self.last_wired_cp_tel = cp_tel
-                if buck_tel is not None:
-                    self.last_wired_buck_tel = buck_tel
+                    tail, self.adb.utc_offset_minutes)
+                if cp_tel is None and buck_tel is None:
+                    self.last_wired_cp_tel = None
+                    self.last_wired_buck_tel = None
+                    self.last_wired_tel_waiting = has_wired_boundary(pp_log)
+                else:
+                    self.last_wired_tel_waiting = False
+                    if cp_tel is not None:
+                        old = self.last_wired_cp_tel
+                        key = (cp_tel["log_time"], cp_tel["vbus_mv"], cp_tel["ibus_ma"])
+                        if old is None or (old.get("log_time"),
+                                           old.get("vbus_mv"),
+                                           old.get("ibus_ma")) != key:
+                            self.last_wired_cp_tel = cp_tel
+                    if buck_tel is not None:
+                        old = self.last_wired_buck_tel
+                        key = (buck_tel["log_time"],
+                               buck_tel["vbus_mv"], buck_tel["ibus_ma"])
+                        if old is None or (old.get("log_time"),
+                                           old.get("vbus_mv"),
+                                           old.get("ibus_ma")) != key:
+                            self.last_wired_buck_tel = buck_tel
             # 无线 track：power_good 边界
             if w_boundary:
                 self.last_cp_mode = w_cp_mode
@@ -1480,6 +1518,13 @@ class Sampler:
             "wired_input_source": wired_source,
             "wired_input_at": wired_at,
             "wired_input_log_time": wired_log_time,
+            "wired_input_age": (
+                round((now_ms - wired_at) / 1000.0)
+                if wired_at is not None else None
+            ),
+            "wired_input_waiting": (
+                self.last_wired_tel_waiting and chosen is None and usb_online
+            ),
             "wired_input_stale": wired_stale,
             "wired_usb_online": usb_online,
             "battery_power_w": round(battery_power, 2) if battery_power is not None else None,
