@@ -320,7 +320,7 @@
       <canvas id="cv-vout" role="img" aria-label="输入电压曲线"></canvas>
     </div>
     <div class="chart-card">
-      <h3>输入电流 (A) <span id="chart-iout">-</span></h3>
+      <h3>输入电流 (mA) <span id="chart-iout">-</span></h3>
       <canvas id="cv-iout" role="img" aria-label="输入电流曲线"></canvas>
     </div>
   </section>
@@ -1115,7 +1115,7 @@ function renderCharts(d) {
     { id: "input_power_w", cv: "cv-input-power", label: "chart-input-power", color: "#22d3ee" },
     { id: "batt_current_ma", cv: "cv-batt-current", label: "chart-batt-current", color: "#34d399" },
     { id: "input_voltage_mv", cv: "cv-vout", label: "chart-vout", color: "#fbbf24", scale: v => v / 1000 },
-    { id: "input_current_ma", cv: "cv-iout", label: "chart-iout", color: "#a78bfa", scale: v => v / 1000 },
+    { id: "input_current_ma", cv: "cv-iout", label: "chart-iout", color: "#a78bfa" },
   ];
   const srcEl = $("chart-input-source");
   if (srcEl) {
