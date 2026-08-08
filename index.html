@@ -605,15 +605,8 @@ function renderVoters(d) {
     if (t === "quick_chg_disable" && wirelessActive) return false;      // 无线充电时隐藏有线快充禁用
     if (t === "wls_quick_chg_disable" && !wirelessActive) return false; // 非无线时隐藏无线快充禁用
     if (t === "wireless_buck_input") {
-      const b = topics[t];
-      const iout = d.derived && d.derived.iout;
-      const vrect = d.derived && d.derived.vrect;
-      const vbat = d.derived && d.derived.batt_voltage_mv;
-      // 电荷泵路径生效：buck 输入限流不在实际功率路径上，隐藏整张卡
-      if (b && b.cp_active) return false;
-      // 物理兜底：iout 远超 icl 物理上限（icl × vrect / vbat）同样视为未生效
-      if (b && b.icl !== null && b.icl !== undefined && iout !== null && iout !== undefined
-          && vrect > 0 && vbat > 0 && iout > b.icl * vrect / vbat * 1.25 + 50) return false;
+      // 模式判定只以 sc8581 电荷泵 work_mode 为准：CP 生效时首页隐藏，详情折叠展示
+      if (topics[t] && topics[t].cp_active) return false;
     }
     const b = topics[t];
     const hasEnabled = (b.rows || []).some(r => r.enable === 1);
@@ -625,7 +618,8 @@ function renderVoters(d) {
   const hasJeita = (jeitaVolt || jeitaCurr) && [jeitaVolt, jeitaCurr].some(b =>
     b && ((b.rows || []).some(r => r.enable === 1)
         || (b.result && b.result.client && b.result.client !== "(null)")));
-  if (!relevant.length && !hasJeita) {
+  const buckCp = topics.wireless_buck_input && topics.wireless_buck_input.cp_active;
+  if (!relevant.length && !hasJeita && !buckCp) {
     el.innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">生效主题</span></h2>` +
       `<p class="note">当前无生效的投票主题（无线/有线未连接或全部票已撤）。</p></div>`;
     return;
@@ -634,6 +628,15 @@ function renderVoters(d) {
   // 结果是否仍有效：拔电/撤票后（该主题无启用票）旧 effective 行不再展示
   const resultValid = b => !!b.result
     && (!(b.rows && b.rows.length) || (b.rows || []).some(r => r.enable === 1));
+
+  const chipHtml = b => (b.rows || []).map(r => {
+    const changed = b.changed && b.changed.client === r.client;
+    const cls = `vote-chip ${r.enable ? "on" : "off"}${changed ? " changed" : ""}`;
+    const unit = b.unit || "";
+    return `<span class="${cls}" title="${esc(r.client)}：生效=${r.enable}，值=${r.value}${unit}">` +
+      `<span class="vc-dot"></span><b>${esc(r.client)}</b><i>${r.value}</i>` +
+      `${unit ? `<small>${unit}</small>` : ""}</span>`;
+  }).join("");
 
   const effectiveOf = b => {
     if (!b) return null;
@@ -661,6 +664,10 @@ function renderVoters(d) {
   };
   const buck = topics.wireless_buck_input;
   const mcaEff = effectiveOf(buck);
+  if (wirelessActive) {
+    const pathLabel = buck && buck.cp_active ? "电荷泵（Quick Wireless）" : "Buck 直充（无线）";
+    summary.push(`<span class="chip" title="由 sc8581 电荷泵 work_mode 判定">当前功率路径<b>${esc(pathLabel)}</b></span>`);
+  }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;
   const vrectNow = d.derived && d.derived.vrect !== null && d.derived.vrect !== undefined
@@ -721,14 +728,7 @@ function renderVoters(d) {
     const b = topics[t];
     const rows = b.rows || [];
     const active = rows.filter(r => r.enable === 1).length;
-    const chips = rows.map(r => {
-      const changed = b.changed && b.changed.client === r.client;
-      const cls = `vote-chip ${r.enable ? "on" : "off"}${changed ? " changed" : ""}`;
-      const unit = b.unit || "";
-      return `<span class="${cls}" title="${esc(r.client)}：生效=${r.enable}，值=${r.value}${unit}">` +
-        `<span class="vc-dot"></span><b>${esc(r.client)}</b><i>${r.value}</i>` +
-        `${unit ? `<small>${unit}</small>` : ""}</span>`;
-    }).join("");
+    const chips = chipHtml(b);
     const changedText = b.changed
       ? ` · 最近变动 ${esc(b.changed.client)} ${b.changed.enabled ? "on" : "off"} → ${b.changed.value}${b.changed.time ? " @ " + b.changed.time : ""}`
       : "";
@@ -777,7 +777,18 @@ function renderVoters(d) {
       `<span class="vote-result">终止电流 <b>${jc === null || jc === undefined ? "-" : jc}</b><small>mA</small></span></div>` +
       `<div class="vote-chips"></div></div>`;
   }
-  el.innerHTML = summaryCard + cards + jeitaCard;
+  // CP 路径生效时，wireless_buck_input 折叠进仲裁详情（不彻底删除）
+  let buckDetail = "";
+  if (buckCp) {
+    const bt = topics.wireless_buck_input;
+    const resTxt = resultValid(bt)
+      ? `<span class="vote-result">名义仲裁 ${esc(bt.result.client)} → ${bt.result.value}${bt.unit || ""}</span>` : "";
+    buckDetail = `<details class="card"><summary><h2>仲裁详情 · wireless_buck_input<span class="tag">未生效</span></h2></summary>` +
+      `<p class="note">当前未生效：电荷泵路径工作中，buck 输入限流不在实际功率路径上；退出 CP 回到 Buck 后将使用该限流。</p>` +
+      `<div class="vote-head">${resTxt}</div>` +
+      `<div class="vote-chips">${chipHtml(bt)}</div></details>`;
+  }
+  el.innerHTML = summaryCard + cards + buckDetail + jeitaCard;
 }
 
 function renderCharts(d) {
