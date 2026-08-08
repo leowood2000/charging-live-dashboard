@@ -593,14 +593,27 @@ function renderVoters(d) {
   // auth_20w/30w/50w/80w/voice_box/magnet 是按充电板型号预置的热控表，
   // 无论连接哪台垫都会被热控客户端投票，不属于“当前设备”的仲裁结果，直接隐藏
   const isDeviceModelTable = t => /^wireless_auth_/.test(t);
+  // BPP/BPPQC2/BPPQC3/EPP 协议表同理：mca_wireless_thermal 会整批投票，不随实际模式变化
+  const isProtocolTable = t => /^wireless_(bpp|epp)/.test(t);
+  // JEITA 终止电压/电流是温度档决定的静态参数，合并成一张卡展示，不占多张卡
+  const isStaticParam = t => t === "term_volt" || t === "term_curr";
+  // 当前是否无线充电（vrect 有值），用于有线/无线快充禁用卡的动态显示
+  const wirelessActive = !!(d.derived && d.derived.vrect > 0);
   // 只显示与当前连接/状态相关的投票主题：有启用票，或驱动已给出实际投票结果
   const relevant = keys.filter(t => {
-    if (isDeviceModelTable(t)) return false;
+    if (isDeviceModelTable(t) || isProtocolTable(t) || isStaticParam(t)) return false;
+    if (t === "quick_chg_disable" && wirelessActive) return false;      // 无线充电时隐藏有线快充禁用
+    if (t === "wls_quick_chg_disable" && !wirelessActive) return false; // 非无线时隐藏无线快充禁用
     const b = topics[t];
     return (b.rows || []).some(r => r.enable === 1)
         || (b.result && b.result.client && b.result.client !== "(null)");
   });
-  if (!relevant.length) {
+  const jeitaVolt = topics.term_volt;
+  const jeitaCurr = topics.term_curr;
+  const hasJeita = (jeitaVolt || jeitaCurr) && [jeitaVolt, jeitaCurr].some(b =>
+    b && ((b.rows || []).some(r => r.enable === 1)
+        || (b.result && b.result.client && b.result.client !== "(null)")));
+  if (!relevant.length && !hasJeita) {
     el.innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">生效主题</span></h2>` +
       `<p class="note">当前无生效的投票主题（无线/有线未连接或全部票已撤）。</p></div>`;
     return;
@@ -664,8 +677,11 @@ function renderVoters(d) {
   }
   addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
   addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
-  addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
-  addSummary("无线快充禁用", effectiveOf(topics.wls_quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
+  if (!wirelessActive) {
+    addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
+  } else {
+    addSummary("无线快充禁用", effectiveOf(topics.wls_quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
+  }
   const th = d.thermal || {};
   if (th.scene) {
     summary.push(`<span class="chip" title="mi_thermald 当前加载的 thermal 场景">生效场景<b>${esc(th.scene)}</b></span>`);
@@ -732,7 +748,20 @@ function renderVoters(d) {
       `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}${ioutText}</div>` +
       `<div class="vote-chips">${chips}</div></div>`;
   }).join("");
-  el.innerHTML = summaryCard + cards;
+  // JEITA 终止参数是温度档决定的静态常数，合并为一张卡
+  let jeitaCard = "";
+  if (hasJeita) {
+    const jv = jeitaVolt && (jeitaVolt.result ? jeitaVolt.result.value :
+      (jeitaVolt.rows && jeitaVolt.rows[0] ? jeitaVolt.rows[0].value : null));
+    const jc = jeitaCurr && (jeitaCurr.result ? jeitaCurr.result.value :
+      (jeitaCurr.rows && jeitaCurr.rows[0] ? jeitaCurr.rows[0].value : null));
+    jeitaCard = `<div class="card"><h2>JEITA 终止参数<span class="tag">静态常数</span></h2>` +
+      `<div class="vote-head"><small>由 JEITA 温度档决定，会话内基本不变，非实时仲裁结果</small>` +
+      `<span class="vote-result">终止电压 <b>${jv === null || jv === undefined ? "-" : jv}</b><small>mV</small></span>` +
+      `<span class="vote-result">终止电流 <b>${jc === null || jc === undefined ? "-" : jc}</b><small>mA</small></span></div>` +
+      `<div class="vote-chips"></div></div>`;
+  }
+  el.innerHTML = summaryCard + cards + jeitaCard;
 }
 
 function renderCharts(d) {
