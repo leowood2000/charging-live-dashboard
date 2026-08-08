@@ -707,33 +707,29 @@ function renderVoters(d) {
   };
   const iclBad = buck && buck.icl !== undefined && buck.icl !== null
     ? iclNotEffective(buck.icl, ioutNow) : false;
-  // 总仲裁只显示“实际结果”：仲裁值未生效时，改用真正约束电流的限流（quick_wireless cur_max / buck_fcc）
-  // 无线输入限流显示输入侧实际限流（如 soc_limit 250）；仅当实际输入电流明显违反该限流时才切换
-  const wlsReplaced = iclBad;
-  const wlsEff = mcaEff && wlsReplaced && buck && buck.actual_limit !== undefined && buck.actual_limit !== null
-    ? { client: buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc",
-        value: buck.actual_limit, calc: false, replaced: true }
-    : mcaEff;
-  if (chargingNow && wlsEff) {
-    const tip = wlsEff.replaced
-      ? "无线输入限流仲裁值未实际生效，此处显示电池侧真正约束电流的限流（quick_wireless cur_max / buck_fcc）"
-      : (wlsEff.calc
-          ? "驱动未输出 effective 行，按已核实 policy 推算"
-          : "驱动 effective vote is now 仲裁结果");
-    const wlsLabel = wlsEff.replaced ? "实际约束限流" : "无线输入限流";
-    summary.push(`<span class="chip" title="${tip}">` +
-      `${wlsLabel}<b>${wlsEff.value}</b><small>${esc(wlsEff.client)}${wlsEff.calc ? " · 推算" : ""}</small></span>`);
+  // 无线输入限流：优先显示驱动实际下发的 wireless loop icl，证据链 soc_limit → effective → icl
+  if (chargingNow && buck) {
+    const wlsClient = (mcaEff && mcaEff.client) || "icl";
+    const wlsValue = (buck.icl !== null && buck.icl !== undefined)
+      ? buck.icl : (mcaEff ? mcaEff.value : null);
+    if (wlsValue !== null && wlsValue !== undefined) {
+      const chain = mcaEff
+        ? `${esc(mcaEff.client)} → wireless_buck_input=${mcaEff.value} → effective=${mcaEff.value} → wireless loop icl=${buck.icl !== undefined && buck.icl !== null ? buck.icl : "-"}（驱动实际下发）`
+        : `wireless loop icl=${buck.icl}（驱动实际下发）`;
+      const tip = chain + (iclBad ? "；实际输入电流远超该限流，当前未生效（见仲裁详情）" : "");
+      summary.push(`<span class="chip"${iclBad ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="${tip}">` +
+        `无线输入限流<b>${wlsValue}</b><small>${esc(wlsClient)}${iclBad ? " · 未生效" : ""}</small></span>`);
+    }
   }
   if (chargingNow) {
     const battMa = d.derived && d.derived.batt_current_ma;
-    const bcEff = effectiveOf(topics.buck_charge_curr);
-    const bcBad = bcEff && bcEff.value !== null && bcEff.value !== undefined
-      && battMa !== null && battMa !== undefined && battMa > bcEff.value * 1.25 + 50;
-    const bcShown = bcBad && buck && buck.actual_limit !== null && buck.actual_limit !== undefined
-      ? { client: buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc",
-          value: buck.actual_limit, calc: false }
-      : bcEff;
-    addSummary("充电电流", bcShown, v => `${v}mA`);
+    // 电池侧充电电流上限：quick_wireless cur_max / buck_fcc，与输入侧 ICL 分开展示
+    if (buck && buck.actual_limit !== null && buck.actual_limit !== undefined) {
+      const src = buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc";
+      summary.push(`<span class="chip" title="电池侧充电电流上限（quick_wireless cur_max / buck_fcc），与输入侧 ICL 不是同一个节点">电池侧充电上限<b>${buck.actual_limit}</b><small>${esc(src)}</small></span>`);
+    } else {
+      addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+    }
     const ceEff = effectiveOf(topics.chg_enable);
     const ceShown = ceEff && ceEff.value === 0
       && battMa !== null && battMa !== undefined && battMa > 300
