@@ -605,19 +605,19 @@ def parse_epp_status(text: str) -> str | None:
     return last
 
 
-def parse_wls_icl(text: str, offset_minutes: int = 0) -> tuple[int, str] | None:
-    """Extract the latest wireless loop icl (driver-applied wireless input limit).
+def parse_wls_icl(text: str, offset_minutes: int = 0) -> tuple[int, int, str] | None:
+    """Extract the latest wireless loop icl + chg_en (driver-applied state).
 
-    Returns (value, shifted local log time) so the frontend can show the value
-    together with its log timestamp and collection time.
+    Returns (icl, chg_en, shifted local log time) so the frontend can show the
+    value together with its log timestamp and whether charging is enabled.
     """
     last = None
     for line in text.splitlines():
-        m = re.search(r"wireless loop: icl:(\d+)", line)
+        m = re.search(r"wireless loop: icl:(\d+), buck_fcc:\d+, chg_en:(\d+)", line)
         if m:
             tm = VOTE_TIME_RE.search(line)
             log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
-            last = (int(m.group(1)), log_time)
+            last = (int(m.group(1)), int(m.group(2)), log_time)
     return last
 
 
@@ -1137,7 +1137,8 @@ class Sampler:
         self.last_wls_icl: int | None = None
         self.last_wls_icl_at: int | None = None
         self.last_wls_icl_log_time: str | None = None
-        self.last_wls_icl_key: tuple[int, str] | None = None
+        self.last_wls_icl_key: tuple[int, int, str] | None = None
+        self.last_wls_chg_en: int | None = None
         # quick wireless 最终电池电流目标（CP 快充路径真正约束电流的值），cur_max 缺失时回退 buck_fcc
         self.last_quick_cur_max: int | None = None
         self.last_buck_fcc: int | None = None
@@ -1263,6 +1264,7 @@ class Sampler:
                 self.last_wls_icl_at = None
                 self.last_wls_icl_log_time = None
                 self.last_wls_icl_key = None
+                self.last_wls_chg_en = None
                 self.last_epp = None
                 self.last_quick_cur_max = None
                 self.last_buck_fcc = None
@@ -1281,12 +1283,13 @@ class Sampler:
                 self.last_rx_iout_limit = wm["rx_iout_limit"]
                 icl = parse_wls_icl(wtail, self.adb.utc_offset_minutes)
                 if icl is not None:
-                    value, log_time = icl
-                    new_key = (value, log_time)
+                    value, chg_en, log_time = icl
+                    new_key = (value, chg_en, log_time)
                     # 同一日志行重复扫描时不刷新“几秒前”，避免旧值伪装成新值
                     if new_key != self.last_wls_icl_key:
                         self.last_wls_icl_key = new_key
                         self.last_wls_icl = value
+                        self.last_wls_chg_en = chg_en
                         self.last_wls_icl_log_time = log_time
                         self.last_wls_icl_at = int(time.time() * 1000)
                 buck_fcc = parse_buck_fcc(wtail)
@@ -1419,6 +1422,8 @@ class Sampler:
                 buck["icl"] = self.last_wls_icl
                 buck["icl_time"] = self.last_wls_icl_log_time or ""
                 buck["icl_at"] = self.last_wls_icl_at or 0
+                if self.last_wls_chg_en is not None:
+                    buck["chg_en"] = self.last_wls_chg_en
         buck = core.get("voters", {}).get("wireless_buck_input")
         if buck is not None:
             actual = self.last_quick_cur_max if self.last_quick_cur_max is not None else self.last_buck_fcc

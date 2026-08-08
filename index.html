@@ -714,10 +714,6 @@ function renderVoters(d) {
     if (isDeviceModelTable(t) || isProtocolTable(t) || isStaticParam(t)) return false;
     if (t === "quick_chg_disable" && wirelessActive) return false;      // 无线充电时隐藏有线快充禁用
     if (t === "wls_quick_chg_disable" && !wirelessActive) return false; // 非无线时隐藏无线快充禁用
-    if (t === "wireless_buck_input") {
-      // 模式判定只以 sc8581 电荷泵 work_mode 为准：CP 生效时首页隐藏，详情折叠展示
-      if (topics[t] && topics[t].cp_active) return false;
-    }
     if (wiredCharging) {
       const wcp = (d.derived && d.derived.wired_cp) || {};
       // 5V/9V 档位参数表：两档同时挂着，不是当前生效值，真正输入限流由 buck_input 表达
@@ -750,8 +746,7 @@ function renderVoters(d) {
   const hasJeita = (jeitaVolt || jeitaCurr) && [jeitaVolt, jeitaCurr].some(b =>
     b && ((b.rows || []).some(r => r.enable === 1)
         || (b.result && b.result.client && b.result.client !== "(null)")));
-  const buckCp = topics.wireless_buck_input && topics.wireless_buck_input.cp_active;
-  if (!relevant.length && !hasJeita && !buckCp) {
+  if (!relevant.length && !hasJeita) {
     el.innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">生效主题</span></h2>` +
       `<p class="note">当前无生效的投票主题（无线/有线未连接或全部票已撤）。</p></div>`;
     return;
@@ -839,8 +834,8 @@ function renderVoters(d) {
       const chain = mcaEff
         ? `${esc(mcaEff.client)} → wireless_buck_input=${mcaEff.value} → effective=${mcaEff.value} → wireless loop icl=${buck.icl !== undefined && buck.icl !== null ? buck.icl : "-"}（驱动实际下发）`
         : `wireless loop icl=${buck.icl}（驱动实际下发）`;
-      const tip = chain + (iclBad ? "；实际输入电流远超该限流，当前未生效（见仲裁详情）" : "");
-      const modeTag = iclBad ? " · 未生效" : "";
+      const tip = chain + (iclBad ? "；BPP 同域电流持续远超该限流，疑似未生效（见卡片状态）" : "");
+      const modeTag = iclBad ? " · 疑似未生效" : "";
       summary.push(`<span class="chip"${iclBad ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="${tip}">` +
         `无线输入限流<b>${wlsValue}</b><small>${esc(wlsClient)}${modeTag}</small></span>`);
     }
@@ -946,20 +941,12 @@ function renderVoters(d) {
       }
     } else if (wirelessActive) {
       // 无线协议控制域（前级）与后级 Buck/CP 路径是独立维度：
-      // BPP drawload 才把 wls_icl 当输入限流；EPP+/QC 只展示 RX 侧上限与实测输出
+      // 总仲裁只保留“当前参与限制的关键结果”：rx_iout_limit 是策略上限、
+      // iout 是遥测值，均不进总仲裁（保留在详情卡/KPI）
       if (wlsMode === "epp_qc") {
         summary.push(`<span class="chip" title="RX/TX 功率协商控制（EPP+/QC），与后级 Buck/CP 路径独立">当前无线模式<b>EPP+/QC</b></span>`);
-        if (buck && buck.rx_iout_limit !== null && buck.rx_iout_limit !== undefined) {
-          summary.push(`<span class="chip" title="strategy_class_wireless_op_get_rx_iout_limit 输出（驱动策略层上限，未确认对应芯片寄存器）">RX 输出电流上限<b>${fmt(buck.rx_iout_limit, 0)}</b><small>mA · driver</small></span>`);
-        }
-        if (ioutNow !== null && ioutNow !== undefined) {
-          summary.push(`<span class="chip" title="wls_debug 线圈侧实际输出电流">实际 RX 输出电流<b>${fmt(ioutNow, 0)}</b><small>mA · wls_debug</small></span>`);
-        }
       } else if (wlsMode === "bpp_drawload") {
         summary.push(`<span class="chip" title="BPP drawload 环控制：iwls 与 iout 同域">当前无线模式<b>BPP · drawload</b></span>`);
-        if (ioutNow !== null && ioutNow !== undefined) {
-          summary.push(`<span class="chip" title="wls_debug 线圈侧实际输出电流">实际 RX 输出电流<b>${fmt(ioutNow, 0)}</b><small>mA · wls_debug</small></span>`);
-        }
       }
       // 无线路径：quick wireless cur_max → 电池侧算法上限；缺失时回退 wireless loop buck_fcc；最后才是 buck_charge_curr
       const dec = buck && buck.cur_max_decision;
@@ -1060,6 +1047,14 @@ function renderVoters(d) {
       } else {
         modeText = `<span class="vote-result" title="无线控制模式未知">控制模式 <b>待确认</b></span>`;
       }
+      // 生效三态：已仲裁并下发 → 已生效；chg_en=0 → 已生效但非瓶颈；同域矛盾 → 疑似未生效
+      if (iclBad) {
+        modeText += `<span class="vote-result" style="color:var(--amber)">状态 <b>疑似未生效</b><small>BPP 同域电流持续超过 ICL</small></span>`;
+      } else if (b.chg_en === 0) {
+        modeText += `<span class="vote-result">状态 <b>已生效 · 当前充电暂停</b><small>chg_en=0，限流非当前瓶颈</small></span>`;
+      } else if (b.icl !== null && b.icl !== undefined) {
+        modeText += `<span class="vote-result">状态 <b>已生效 · 已下发</b><small>effective → wireless loop icl</small></span>`;
+      }
       const xmWls = (b.rows || []).find(r => r.client === "xm_wls");
       if (xmWls && xmWls.enable === 1) {
         modeText += `<span class="vote-result" title="xm_wls 是无线能力/适配器允许的最大输入电流票，不是当前仲裁 winner">无线能力票 xm_wls <b>${xmWls.value}</b><small>mA</small></span>`;
@@ -1068,7 +1063,7 @@ function renderVoters(d) {
         modeText += `<span class="vote-result" title="strategy_class_wireless_op_get_rx_iout_limit 输出（驱动策略层上限，未确认对应芯片寄存器）">RX 输出电流上限 <b>${fmt(b.rx_iout_limit, 0)}</b><small>mA · driver</small></span>`;
       }
     }
-    return `<div class="card"><h2>${esc(t)}<span class="tag">生效 ${active}/${rows.length}</span></h2>` +
+    return `<div class="card"><h2>${esc(t)}<span class="tag">${active}/${rows.length} 票</span></h2>` +
       `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}${ioutText}${modeText}</div>` +
       `<div class="vote-chips">${chips}</div></div>`;
   }).join("");
@@ -1084,17 +1079,6 @@ function renderVoters(d) {
       `<span class="vote-result">终止电压 <b>${jv === null || jv === undefined ? "-" : jv}</b><small>mV</small></span>` +
       `<span class="vote-result">终止电流 <b>${jc === null || jc === undefined ? "-" : jc}</b><small>mA</small></span></div>` +
       `<div class="vote-chips"></div></div>`;
-  }
-  // CP 路径生效时，wireless_buck_input 折叠进仲裁详情（不彻底删除）；仅无线路径展示
-  let buckDetail = "";
-  if (chargingNow && wirelessActive && buckCp) {
-    const bt = topics.wireless_buck_input;
-    const resTxt = resultValid(bt)
-      ? `<span class="vote-result">名义仲裁 ${esc(bt.result.client)} → ${bt.result.value}${bt.unit || ""}</span>` : "";
-    buckDetail = `<details class="card"><summary><h2>仲裁详情 · wireless_buck_input<span class="tag">未生效</span></h2></summary>` +
-      `<p class="note">当前未生效：电荷泵路径工作中，buck 输入限流不在实际功率路径上；退出 CP 回到 Buck 后将使用该限流。</p>` +
-      `<div class="vote-head">${resTxt}</div>` +
-      `<div class="vote-chips">${chipHtml(bt)}</div></details>`;
   }
   // Quick Wireless 电池电流决策：算法聚合（非 MCA votable），仅无线路径展示
   let quickCard = "";
@@ -1123,7 +1107,7 @@ function renderVoters(d) {
     ? `<div class="card"><h2>电流投票实时表<span class="tag">未充电</span></h2>` +
       `<p class="note">当前未充电（battery STATUS ≠ Charging），投票/仲裁不生效。</p></div>`
     : "";
-  el.innerHTML = summaryCard + notChargingNote + cardsShown + quickCard + buckDetail + jeitaCard;
+  el.innerHTML = summaryCard + notChargingNote + cardsShown + quickCard + jeitaCard;
 }
 
 function renderCharts(d) {
