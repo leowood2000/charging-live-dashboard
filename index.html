@@ -598,11 +598,21 @@ function renderVoters(d) {
   const isProtocolTable = t => /^wireless_(bpp|epp)/.test(t);
   // JEITA 终止电压/电流是温度档决定的静态参数，合并成一张卡展示，不占多张卡
   const isStaticParam = t => t === "term_volt" || t === "term_curr";
+  // 有线档位参数表（5V/9V）与 CP 分压表：预置表，不是当前路径的生效值
+  const WIRED_PRESET_TOPICS = new Set([
+    "buck_5v_in", "buck_9v_in", "buck_5v_ich", "buck_9v_ich",
+  ]);
+  const WIRED_CP_TOPICS = new Set([
+    "div1_single", "div1_multi", "div2_single", "div2_multi",
+    "div4_single", "div4_multi", "single_chg_cur", "multi_chg_cur", "thermal_flip",
+  ]);
   // 当前是否无线充电（vrect 有值），用于有线/无线快充禁用卡的动态显示
   const wirelessActive = !!(d.derived && d.derived.vrect > 0);
   // 是否真正在充电：以 battery STATUS 为准（缺失时保守显示）
   const battSt = (d.battery && d.battery.status && d.battery.status.value || "").toLowerCase();
   const chargingNow = battSt === "" ? true : battSt === "charging";
+  const wirelessCharging = chargingNow && wirelessActive;
+  const wiredCharging = chargingNow && !wirelessActive;
   // 日志数据年龄：投票/仲裁来自 10 秒日志周期，可能与 3 秒实时 KPI 短暂不一致
   const logsAge = d.meta && d.meta.logs_updated_at
     ? Math.max(0, Math.round((Date.now() - d.meta.logs_updated_at) / 1000)) : null;
@@ -623,6 +633,14 @@ function renderVoters(d) {
     if (t === "wireless_buck_input") {
       // 模式判定只以 sc8581 电荷泵 work_mode 为准：CP 生效时首页隐藏，详情折叠展示
       if (topics[t] && topics[t].cp_active) return false;
+    }
+    if (wiredCharging) {
+      // 5V/9V 档位参数表：两档同时挂着，不是当前生效值，真正输入限流由 buck_input 表达
+      if (WIRED_PRESET_TOPICS.has(t)) return false;
+      // 有线 CP 未确认前隐藏分压表；以后解析出有线 CP 状态后按 div1/div2/div4 比例动态放行
+      if (WIRED_CP_TOPICS.has(t)) return false;
+      // 无线相关表有线时无效
+      if (t.startsWith("wireless_")) return false;
     }
     const b = topics[t];
     const hasEnabled = (b.rows || []).some(r => r.enable === 1);
