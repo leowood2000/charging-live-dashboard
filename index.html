@@ -825,8 +825,9 @@ function renderVoters(d) {
   // EPP+/QC 阶段 wls_icl 与 iout 属于不同控制域，禁止比较
   const iclBad = wlsMode === "bpp_drawload" && buck && buck.icl !== undefined && buck.icl !== null
     ? iclNotEffective(buck.icl, ioutNow) : false;
-  // 无线输入限流：仅 BPP drawload 阶段进入总仲裁；EPP+/QC 阶段只保留在详情卡
-  if (chargingNow && wirelessActive && buck && wlsMode === "bpp_drawload") {
+  // 无线输入限流：MCA effective → wireless loop icl 已仲裁并下发，进入总仲裁；
+  // BPP drawload 才做同域一致性检查；EPP+/QC 不与 iout 直接比较
+  if (chargingNow && wirelessActive && buck) {
     const wlsClient = (mcaEff && mcaEff.client) || "icl";
     const wlsValue = (buck.icl !== null && buck.icl !== undefined)
       ? buck.icl : (mcaEff ? mcaEff.value : null);
@@ -834,8 +835,17 @@ function renderVoters(d) {
       const chain = mcaEff
         ? `${esc(mcaEff.client)} → wireless_buck_input=${mcaEff.value} → effective=${mcaEff.value} → wireless loop icl=${buck.icl !== undefined && buck.icl !== null ? buck.icl : "-"}（驱动实际下发）`
         : `wireless loop icl=${buck.icl}（驱动实际下发）`;
-      const tip = chain + (iclBad ? "；BPP 同域电流持续远超该限流，疑似未生效（见卡片状态）" : "");
-      const modeTag = iclBad ? " · 疑似未生效" : "";
+      let tip = chain;
+      let modeTag = " · 已生效";
+      if (iclBad) {
+        tip += "；BPP 同域电流持续远超该限流，疑似未生效（见卡片状态）";
+        modeTag = " · 疑似未生效";
+      } else if (buck.chg_en === 0) {
+        tip += "；已仲裁并下发，chg_en=0，当前非实际电流瓶颈";
+        modeTag = " · 已生效·充电暂停";
+      } else {
+        tip += "；已仲裁并下发至 wireless loop";
+      }
       summary.push(`<span class="chip"${iclBad ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="${tip}">` +
         `无线输入限流<b>${wlsValue}</b><small>${esc(wlsClient)}${modeTag}</small></span>`);
     }
