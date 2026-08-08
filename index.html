@@ -825,27 +825,27 @@ function renderVoters(d) {
   // EPP+/QC 阶段 wls_icl 与 iout 属于不同控制域，禁止比较
   const iclBad = wlsMode === "bpp_drawload" && buck && buck.icl !== undefined && buck.icl !== null
     ? iclNotEffective(buck.icl, ioutNow) : false;
-  // 总仲裁无线输入项：显示“无线输入控制”——
-  // 当前 work_mode 后的执行 ICL 作为主值，MCA effective 作为仲裁来源/对照；
+  // 总仲裁无线输入项：主值永远为 wireless_buck_input 的 MCA effective（仲裁结果）；
+  // 执行层 ICL 作为次级信息单独展示（一致 / 下游进一步限制 / 充电暂停），
   // effective 生命周期只随会话（power_good_off 清空），work_mode 变化不使其失效
   if (chargingNow && wirelessActive && buck) {
     const workMs = buck.wls_work_mode_ms || 0;
     const iclCur = buck.icl !== null && buck.icl !== undefined
       && (!workMs || (buck.icl_ms || 0) >= workMs);
-    const pauseTag = buck.chg_en === 0 ? " · 充电暂停" : "";
-    if (iclCur) {
-      const smallTxt = mcaEff
-        ? (mcaEff.value === buck.icl
-            ? `仲裁 ${esc(mcaEff.client)} → ${mcaEff.value}mA · 一致`
-            : `仲裁 ${esc(mcaEff.client)} → ${mcaEff.value}mA · 下游降至 ${buck.icl}mA`)
-        : "仲裁来源未捕获";
-      summary.push(`<span class="chip" title="执行层实际下发 ICL（当前 work_mode 后）；MCA 仲裁见小字">` +
-        `无线输入控制<b>${fmt(buck.icl, 0)}</b><small>执行 ICL${pauseTag} · ${smallTxt}</small></span>`);
-    } else if (mcaEff) {
-      summary.push(`<span class="chip" title="当前路径尚未捕获新的执行 ICL，显示 MCA 仲裁值（本会话持续状态，不受 work_mode 失效）">` +
-        `无线输入控制<b>${fmt(mcaEff.value, 0)}</b><small>MCA仲裁${pauseTag} · 执行 ICL 待捕获</small></span>`);
+    if (mcaEff) {
+      summary.push(`<span class="chip" title="wireless_buck_input MCA 仲裁结果（本会话持续状态，不受 work_mode 失效）">` +
+        `无线输入仲裁<b>${fmt(mcaEff.value, 0)}</b><small>${esc(mcaEff.client)}</small></span>`);
     } else {
-      summary.push(`<span class="chip" title="无线输入暂无仲裁结果或执行 ICL">无线输入控制<b>--</b><small>尚无控制结果</small></span>`);
+      summary.push(`<span class="chip" title="未捕获 wireless_buck_input effective，不以执行 ICL 反推仲裁">` +
+        `无线输入仲裁<b>--</b><small>未捕获</small></span>`);
+    }
+    if (iclCur) {
+      const rel = buck.chg_en === 0 ? "充电暂停"
+        : (mcaEff && mcaEff.value === buck.icl) ? "一致"
+        : (mcaEff && mcaEff.value > buck.icl) ? "下游进一步限制"
+        : (mcaEff && mcaEff.value < buck.icl) ? "执行高于仲裁" : "执行层下发";
+      summary.push(`<span class="chip" title="wireless loop 实际下发 ICL（执行层控制值，非仲裁结果）">` +
+        `执行 ICL<b>${fmt(buck.icl, 0)}</b><small>${rel}</small></span>`);
     }
   }
   if (chargingNow) {
