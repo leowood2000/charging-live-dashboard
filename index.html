@@ -635,12 +635,26 @@ function renderVoters(d) {
       if (topics[t] && topics[t].cp_active) return false;
     }
     if (wiredCharging) {
+      const wcp = (d.derived && d.derived.wired_cp) || {};
       // 5V/9V 档位参数表：两档同时挂着，不是当前生效值，真正输入限流由 buck_input 表达
       if (WIRED_PRESET_TOPICS.has(t)) return false;
-      // 有线 CP 未确认前隐藏分压表；以后解析出有线 CP 状态后按 div1/div2/div4 比例动态放行
-      if (WIRED_CP_TOPICS.has(t)) return false;
       // 无线相关表有线时无效
       if (t.startsWith("wireless_")) return false;
+      if (wcp.state === "cp") {
+        // 有线 CP 激活：只保留对应比例的 div 卡 + single/multi/thermal_flip
+        if (WIRED_CP_TOPICS.has(t)) {
+          if (t.startsWith("div")) {
+            const want = "div" + (wcp.ratio || "");
+            if (!t.startsWith(want)) return false;
+          }
+          return true;
+        }
+        // CP 路径下隐藏 buck 输入/FCC 卡
+        if (t === "buck_input" || t === "buck_charge_curr") return false;
+      } else {
+        // Buck 或未知：隐藏全部 CP 分压表
+        if (WIRED_CP_TOPICS.has(t)) return false;
+      }
     }
     const b = topics[t];
     const hasEnabled = (b.rows || []).some(r => r.enable === 1);
@@ -746,6 +760,23 @@ function renderVoters(d) {
     }
   }
   if (chargingNow) {
+    const realTypeNode = (d.nodes || []).find(n => n.id === "real_type");
+    const connLabel = wiredCharging ? "有线" : wirelessCharging ? "无线" : "未知";
+    const rtRaw = realTypeNode && realTypeNode.value ? String(realTypeNode.value) : "";
+    const rtShow = rtRaw && !/^(unknown|未连接（放电中）|未识别（充电中）)$/i.test(rtRaw) ? rtRaw : "";
+    summary.push(`<span class="chip" title="battery 状态与 real_type">连接类型<b>${esc(connLabel)}</b>${rtShow ? `<small>${esc(rtShow)}</small>` : ""}</span>`);
+    if (wiredCharging) {
+      const wcp = (d.derived && d.derived.wired_cp) || {};
+      let wPath;
+      if (wcp.state === "cp") {
+        wPath = `电荷泵（有线）${wcp.ratio ? " · " + wcp.ratio + ":1" : ""}`;
+      } else if (wcp.state === "buck") {
+        wPath = "Buck 直充（有线）";
+      } else {
+        wPath = "有线功率路径待确认";
+      }
+      summary.push(`<span class="chip" title="有线 CP 状态：sc8581 operation mode + quickchg work_mode/ratio + cur_work_cp">当前功率路径<b>${esc(wPath)}</b></span>`);
+    }
     const battMa = d.derived && d.derived.batt_current_ma;
     const dec = buck && buck.cur_max_decision;
     // 电池侧算法上限：quick wireless 最近一次 cur_max:[Final]（带年龄，超 30s 标历史值）

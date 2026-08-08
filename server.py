@@ -649,21 +649,41 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
     decision: dict | None = None
     inputs: dict | None = None
     boundary_seen = False
+    wired_mode: int | None = None
+    wired_ratio: int | None = None
+    wired_cur_cp = False
     for line in text.splitlines():
-        if "power_good_on" in line or "power_good_off" in line:
+        if ("power_good_on" in line or "power_good_off" in line
+                or "usb online: 0" in line or "usb online: 1" in line
+                or "real_type changed:" in line):
             boundary_seen = True
             cp_mode = None
             cp_work_mode = None
             decision = None
             inputs = None
+            wired_mode = None
+            wired_ratio = None
+            wired_cur_cp = False
             continue
         m = re.search(r"set operation mode (\d+)", line)
         if m:
             cp_mode = int(m.group(1))
+            wired_mode = int(m.group(1))
             continue
         m = re.search(r"select_cur_work_mode:.*work_mode=(\d+)", line)
         if m:
             cp_work_mode = int(m.group(1))
+            continue
+        m = re.search(r"update_work_mode_para:.*work_mode: (\d+)", line)
+        if m:
+            wired_ratio = int(m.group(1))
+            continue
+        m = re.search(r"map_ibus_to_fsw:.*ratio: (\d+)", line)
+        if m:
+            wired_ratio = int(m.group(1))
+            continue
+        if "mca_quick_charge_select_max_ibat:" in line and "cur_work_cp" in line:
+            wired_cur_cp = True
             continue
         m = re.search(
             r"select_max_ibat:445 \[channel_cur:(\d+)\], \[temp_max_cur:(\d+)\], "
@@ -685,7 +705,8 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
         if m2 and inputs is not None:
             decision = dict(inputs)
             decision["final"] = int(m2.group(1))
-    return cp_mode, cp_work_mode, decision, boundary_seen
+    return (cp_mode, cp_work_mode, decision, boundary_seen,
+            wired_mode, wired_ratio, wired_cur_cp)
 
 
 def is_last_wireless_power_off(text: str) -> bool:
@@ -858,6 +879,10 @@ class Sampler:
         self.last_cp_work_mode: int | None = None
         # select_max_ibat 完整决策（输入 + cur_max Final + 日志时间）
         self.last_cur_decision: dict | None = None
+        # 有线 CP 状态：会话内最后一次 operation mode / work_mode/ratio / cur_work_cp 证据
+        self.last_wired_cp_mode: int | None = None
+        self.last_wired_cp_ratio: int | None = None
+        self.last_wired_cur_cp: bool = False
 
     def start(self) -> None:
         threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
@@ -967,13 +992,17 @@ class Sampler:
                 buck_fcc = parse_buck_fcc(session_log)
                 if buck_fcc is not None:
                     self.last_buck_fcc = buck_fcc
-                cp_mode, cp_work_mode, cur_decision, boundary_seen = parse_session_cp_state(
+                (cp_mode, cp_work_mode, cur_decision, boundary_seen,
+                 wired_mode, wired_ratio, wired_cur_cp) = parse_session_cp_state(
                     session_log, self.adb.utc_offset_minutes)
                 if boundary_seen:
                     # 窗口内有会话切换：以本次解析为准，没有新行就清空旧状态
                     self.last_cp_mode = cp_mode
                     self.last_cp_work_mode = cp_work_mode
                     self.last_cur_decision = cur_decision
+                    self.last_wired_cp_mode = wired_mode
+                    self.last_wired_cp_ratio = wired_ratio
+                    self.last_wired_cur_cp = wired_cur_cp
                 else:
                     if cp_mode is not None:
                         self.last_cp_mode = cp_mode
@@ -981,6 +1010,12 @@ class Sampler:
                         self.last_cp_work_mode = cp_work_mode
                     if cur_decision is not None:
                         self.last_cur_decision = cur_decision
+                    if wired_mode is not None:
+                        self.last_wired_cp_mode = wired_mode
+                    if wired_ratio is not None:
+                        self.last_wired_cp_ratio = wired_ratio
+                    if wired_cur_cp:
+                        self.last_wired_cur_cp = True
 
         self.logs_stale = not vote_read_ok or not session_read_ok
         self.logs_updated_at = time.time() * 1000
@@ -1031,6 +1066,20 @@ class Sampler:
                 buck["cp_ratio"] = self.last_cp_work_mode
             if self.last_cur_decision is not None:
                 buck["cur_max_decision"] = copy.deepcopy(self.last_cur_decision)
+        # 有线 CP 三态：cp / buck / unknown（本会话无 SC8581 模式日志则待确认）
+        wmode = self.last_wired_cp_mode
+        if wmode is not None:
+            wstate = "cp" if wmode > 0 else "buck"
+        elif self.last_wired_cur_cp:
+            wstate = "cp"
+        else:
+            wstate = "unknown"
+        core.setdefault("derived", {})["wired_cp"] = {
+            "state": wstate,
+            "ratio": self.last_wired_cp_ratio if wstate == "cp" else None,
+            "active": wstate == "cp",
+            "cur_work_cp": bool(self.last_wired_cur_cp),
+        }
         meta = core.setdefault("meta", {})
         meta.update({
             "interval": self.fast_interval,
