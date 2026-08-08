@@ -647,48 +647,71 @@ def parse_quick_cur_decision(text: str, offset_minutes: int = 0) -> dict | None:
 
 
 def parse_session_cp_state(text: str, offset_minutes: int = 0):
-    """按会话解析 CP 状态：遇到 power_good_on/off 重置，只保留当前会话内的
-    sc8581 模式、分压比与 select_max_ibat 决策，避免上一会话残留冒充当前值。"""
-    cp_mode: int | None = None
-    cp_work_mode: int | None = None
-    decision: dict | None = None
-    inputs: dict | None = None
-    boundary_seen = False
-    wired_mode: int | None = None
-    wired_ratio: int | None = None
-    wired_cur_cp = False
+    """无线/有线 CP 状态彻底解耦：
+    - power_good 只重置无线 track；usb online / real_type changed 只重置有线 track
+    - SC8581 operation mode 只有在对应 quickchg 上下文出现后才写入对应 track
+    """
+    # 无线 track（power_good 边界）
+    w_cp_mode: int | None = None
+    w_cp_work_mode: int | None = None
+    w_decision: dict | None = None
+    w_inputs: dict | None = None
+    w_boundary = False
+    w_ctx = False
+    # 有线 track（usb online / real_type changed 边界）
+    d_cp_mode: int | None = None
+    d_cp_ratio: int | None = None
+    d_cur_cp = False
+    d_boundary = False
+    d_ctx = False
     for line in text.splitlines():
-        if ("power_good_on" in line or "power_good_off" in line
-                or "usb online: 0" in line or "usb online: 1" in line
-                or "real_type changed:" in line):
-            boundary_seen = True
-            cp_mode = None
-            cp_work_mode = None
-            decision = None
-            inputs = None
-            wired_mode = None
-            wired_ratio = None
-            wired_cur_cp = False
+        if "power_good_on" in line or "power_good_off" in line:
+            w_boundary = True
+            w_cp_mode = None
+            w_cp_work_mode = None
+            w_decision = None
+            w_inputs = None
+            w_ctx = False
             continue
+        if ("usb online: 0" in line or "usb online: 1" in line
+                or "real_type changed:" in line):
+            d_boundary = True
+            d_cp_mode = None
+            d_cp_ratio = None
+            d_cur_cp = False
+            d_ctx = False
+            continue
+        # 上下文：无线 quickchg 与有线 quickchg 互斥
+        if "mca_wireless_quick_charge_" in line:
+            w_ctx = True
+            d_ctx = False
+        if "mca_quick_charge_" in line or "strategy_quickchg_" in line:
+            d_ctx = True
+            w_ctx = False
         m = re.search(r"set operation mode (\d+)", line)
         if m:
-            cp_mode = int(m.group(1))
-            wired_mode = int(m.group(1))
+            n = int(m.group(1))
+            if w_ctx:
+                w_cp_mode = n
+            if d_ctx:
+                d_cp_mode = n
             continue
-        m = re.search(r"select_cur_work_mode:.*work_mode=(\d+)", line)
+        m = re.search(r"mca_wireless_quick_charge_select_cur_work_mode:.*work_mode=(\d+)", line)
         if m:
-            cp_work_mode = int(m.group(1))
+            w_cp_work_mode = int(m.group(1))
             continue
         m = re.search(r"update_work_mode_para:.*work_mode: (\d+)", line)
         if m:
-            wired_ratio = int(m.group(1))
+            d_cp_ratio = int(m.group(1))
             continue
         m = re.search(r"map_ibus_to_fsw:.*ratio: (\d+)", line)
         if m:
-            wired_ratio = int(m.group(1))
+            d_cp_ratio = int(m.group(1))
             continue
         if "mca_quick_charge_select_max_ibat:" in line and "cur_work_cp" in line:
-            wired_cur_cp = True
+            d_cur_cp = True
+            continue
+        if "mca_wireless_quick_charge_select_max_ibat:" not in line:
             continue
         m = re.search(
             r"select_max_ibat:445 \[channel_cur:(\d+)\], \[temp_max_cur:(\d+)\], "
@@ -696,7 +719,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
             line)
         if m:
             tm = VOTE_TIME_RE.search(line)
-            inputs = {
+            w_inputs = {
                 "channel_cur": int(m.group(1)),
                 "temp_max_cur": int(m.group(2)),
                 "tx_adapter_max": int(m.group(3)),
@@ -707,11 +730,13 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
             }
             continue
         m2 = re.search(r"select_max_ibat:446 cur_max:\[Final\]: (\d+)", line)
-        if m2 and inputs is not None:
-            decision = dict(inputs)
-            decision["final"] = int(m2.group(1))
-    return (cp_mode, cp_work_mode, decision, boundary_seen,
-            wired_mode, wired_ratio, wired_cur_cp)
+        if m2 and w_inputs is not None:
+            w_decision = dict(w_inputs)
+            w_decision["final"] = int(m2.group(1))
+    return {
+        "wireless": (w_cp_mode, w_cp_work_mode, w_decision, w_boundary),
+        "wired": (d_cp_mode, d_cp_ratio, d_cur_cp, d_boundary),
+    }
 
 
 def is_last_wireless_power_off(text: str) -> bool:
@@ -997,29 +1022,33 @@ class Sampler:
                 buck_fcc = parse_buck_fcc(session_log)
                 if buck_fcc is not None:
                     self.last_buck_fcc = buck_fcc
-                (cp_mode, cp_work_mode, cur_decision, boundary_seen,
-                 wired_mode, wired_ratio, wired_cur_cp) = parse_session_cp_state(
+                state = parse_session_cp_state(
                     session_log, self.adb.utc_offset_minutes)
-                if boundary_seen:
-                    # 窗口内有会话切换：以本次解析为准，没有新行就清空旧状态
-                    self.last_cp_mode = cp_mode
-                    self.last_cp_work_mode = cp_work_mode
-                    self.last_cur_decision = cur_decision
-                    self.last_wired_cp_mode = wired_mode
-                    self.last_wired_cp_ratio = wired_ratio
-                    self.last_wired_cur_cp = wired_cur_cp
+                w_cp_mode, w_cp_work_mode, w_decision, w_boundary = state["wireless"]
+                d_cp_mode, d_cp_ratio, d_cur_cp, d_boundary = state["wired"]
+                # 无线 track：power_good 边界
+                if w_boundary:
+                    self.last_cp_mode = w_cp_mode
+                    self.last_cp_work_mode = w_cp_work_mode
+                    self.last_cur_decision = w_decision
                 else:
-                    if cp_mode is not None:
-                        self.last_cp_mode = cp_mode
-                    if cp_work_mode is not None:
-                        self.last_cp_work_mode = cp_work_mode
-                    if cur_decision is not None:
-                        self.last_cur_decision = cur_decision
-                    if wired_mode is not None:
-                        self.last_wired_cp_mode = wired_mode
-                    if wired_ratio is not None:
-                        self.last_wired_cp_ratio = wired_ratio
-                    if wired_cur_cp:
+                    if w_cp_mode is not None:
+                        self.last_cp_mode = w_cp_mode
+                    if w_cp_work_mode is not None:
+                        self.last_cp_work_mode = w_cp_work_mode
+                    if w_decision is not None:
+                        self.last_cur_decision = w_decision
+                # 有线 track：usb online / real_type changed 边界
+                if d_boundary:
+                    self.last_wired_cp_mode = d_cp_mode
+                    self.last_wired_cp_ratio = d_cp_ratio
+                    self.last_wired_cur_cp = d_cur_cp
+                else:
+                    if d_cp_mode is not None:
+                        self.last_wired_cp_mode = d_cp_mode
+                    if d_cp_ratio is not None:
+                        self.last_wired_cp_ratio = d_cp_ratio
+                    if d_cur_cp:
                         self.last_wired_cur_cp = True
 
         self.logs_stale = not vote_read_ok or not session_read_ok
