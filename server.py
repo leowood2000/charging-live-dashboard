@@ -315,16 +315,7 @@ class AdbReader:
         pattern = ("power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|"
                    "FAST_CHARGE|fast chg success|set chg current|open path ibus|"
                    "smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|"
-                   "strategy_wireless_get_charging_info|"
-                   "mca_wireless_quick_charge_select_max_ibat|"
-                   "sc8581_set_operation_mode|"
-                   "mca_wireless_quick_charge_select_cur_work_mode|"
-                   "usb online|real_type changed|"
-                   "mca_quick_charge_update_work_mode_para|"
-                   "strategy_quickchg_map_ibus_to_fsw|"
-                   "mca_quick_charge_select_max_ibat|"
-                   "mca_quick_charge_select_cur_work_mode|"
-                   "mca_strategy_buckchg|strategy_buckchg")
+                   "strategy_wireless_get_charging_info")
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)
@@ -343,6 +334,38 @@ class AdbReader:
                 f"tail -c {tail_bytes} {MCA_LOG_DIR}/{f} | grep -a -E '{pattern}' | grep -v sysfs_show"
                 for f in files)
             code, out, _ = self._run(["shell", "su", "-c", f'"{script}"'], timeout=25)
+            return (code in (0, 1), out if code in (0, 1) else "")
+        except FileNotFoundError:
+            return False, ""
+
+    def read_power_path_logs(self, tail_bytes: int = 1048576, tail_lines: int = 200) -> tuple[bool, str]:
+        """Grep power-path signals from the newest log only, bounded on device.
+
+        只读最新 1 个文件 1MB，并在手机端 grep + tail -n 200 后再返回，
+        避免高频 quickchg/buckchg 行撑爆 Wi-Fi ADB。
+        """
+        if not self.available:
+            return False, ""
+        pattern = ("power_good|usb online|real_type changed|"
+                   "sc8581_set_operation_mode|"
+                   "mca_quick_charge_update_work_mode_para|"
+                   "strategy_quickchg_map_ibus_to_fsw|"
+                   "cur_work_cp|"
+                   "strategy_buckchg_charge_limit|"
+                   "mca_wireless_quick_charge_select_cur_work_mode|"
+                   "mca_wireless_quick_charge_select_max_ibat")
+        try:
+            code, out, _ = self._run(
+                ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n 1"'], timeout=10)
+            if code != 0 or not out.strip():
+                return False, ""
+            fname = out.strip().splitlines()[0].strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.\-]+", fname):
+                return False, ""
+            path = f"{MCA_LOG_DIR}/{fname}"
+            script = (f"tail -c {tail_bytes} {path} | grep -a -E '{pattern}' "
+                      f"| tail -n {tail_lines}")
+            code, out, _ = self._run(["shell", "su", "-c", f'"{script}"'], timeout=15)
             return (code in (0, 1), out if code in (0, 1) else "")
         except FileNotFoundError:
             return False, ""
@@ -913,7 +936,9 @@ class Sampler:
         self.adb = adb
         self.fast_interval = max(1.0, float(fast_interval))
         self.logs_interval = max(5.0, float(logs_interval))
-        self.logs_stale = False
+        self.vote_logs_stale = False
+        self.session_logs_stale = False
+        self.power_path_logs_stale = False
         self.logs_updated_at = time.time() * 1000
         # 使用独立 stop_event，避免覆盖 threading.Thread 内部的 _stop()
         self.stop_event = threading.Event()
@@ -1009,12 +1034,18 @@ class Sampler:
             return
         vote_read_ok, vote_log = self.adb.read_vote_logs()
         session_read_ok, session_log = self.adb.read_session_logs()
+        pp_read_ok, pp_log = self.adb.read_power_path_logs()
+        # 三条通道独立 stale：功率路径失败不再拖累 session/vote 主链路
+        self.vote_logs_stale = not vote_read_ok
+        self.session_logs_stale = not session_read_ok
+        self.power_path_logs_stale = not pp_read_ok
         # 读取成功但内容为空（如 grep 无匹配）不算失败，仅保留旧数据
         if vote_read_ok and vote_log.strip():
             parsed_voters = parse_vote_blocks(vote_log, self.adb.utc_offset_minutes)
             if parsed_voters:
                 self.last_voters = parsed_voters
 
+        # 会话/EPP/ICL：低频瘦通道
         if session_read_ok and session_log.strip():
             parsed_sessions = parse_sessions(session_log, self.adb.utc_offset_minutes)
             if parsed_sessions:
@@ -1045,45 +1076,45 @@ class Sampler:
                         self.last_wls_icl = value
                         self.last_wls_icl_log_time = log_time
                         self.last_wls_icl_at = int(time.time() * 1000)
-                quick_cur_max = parse_quick_cur_max(session_log)
-                if quick_cur_max is not None:
-                    self.last_quick_cur_max = quick_cur_max
                 buck_fcc = parse_buck_fcc(session_log)
                 if buck_fcc is not None:
                     self.last_buck_fcc = buck_fcc
-                state = parse_session_cp_state(
-                    session_log, self.adb.utc_offset_minutes)
-                w_cp_mode, w_cp_work_mode, w_decision, w_boundary = state["wireless"]
-                d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary = state["wired"]
-                # 无线 track：power_good 边界
-                if w_boundary:
+        # 功率路径：高频信号专用通道（手机端已 tail -n 200 封顶）
+        if pp_read_ok and pp_log.strip():
+            quick_cur_max = parse_quick_cur_max(pp_log)
+            if quick_cur_max is not None:
+                self.last_quick_cur_max = quick_cur_max
+            state = parse_session_cp_state(pp_log, self.adb.utc_offset_minutes)
+            w_cp_mode, w_cp_work_mode, w_decision, w_boundary = state["wireless"]
+            d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary = state["wired"]
+            # 无线 track：power_good 边界
+            if w_boundary:
+                self.last_cp_mode = w_cp_mode
+                self.last_cp_work_mode = w_cp_work_mode
+                self.last_cur_decision = w_decision
+            else:
+                if w_cp_mode is not None:
                     self.last_cp_mode = w_cp_mode
+                if w_cp_work_mode is not None:
                     self.last_cp_work_mode = w_cp_work_mode
+                if w_decision is not None:
                     self.last_cur_decision = w_decision
-                else:
-                    if w_cp_mode is not None:
-                        self.last_cp_mode = w_cp_mode
-                    if w_cp_work_mode is not None:
-                        self.last_cp_work_mode = w_cp_work_mode
-                    if w_decision is not None:
-                        self.last_cur_decision = w_decision
-                # 有线 track：usb online / real_type changed 边界
-                if d_boundary:
+            # 有线 track：usb online / real_type changed 边界
+            if d_boundary:
+                self.last_wired_state = d_state
+                self.last_wired_cp_ratio = d_cp_ratio
+                self.last_wired_cur_cp = d_cur_cp
+                self.last_wired_buck = d_buck
+            else:
+                if d_state != "unknown":
                     self.last_wired_state = d_state
+                if d_cp_ratio is not None:
                     self.last_wired_cp_ratio = d_cp_ratio
-                    self.last_wired_cur_cp = d_cur_cp
-                    self.last_wired_buck = d_buck
-                else:
-                    if d_state != "unknown":
-                        self.last_wired_state = d_state
-                    if d_cp_ratio is not None:
-                        self.last_wired_cp_ratio = d_cp_ratio
-                    if d_cur_cp:
-                        self.last_wired_cur_cp = True
-                    if d_buck:
-                        self.last_wired_buck = True
+                if d_cur_cp:
+                    self.last_wired_cur_cp = True
+                if d_buck:
+                    self.last_wired_buck = True
 
-        self.logs_stale = not vote_read_ok or not session_read_ok
         self.logs_updated_at = time.time() * 1000
         # 复制、合并日志缓存、发布在同一个锁内完成，避免旧快照覆盖新快照
         self._publish_logs_only()
@@ -1146,7 +1177,8 @@ class Sampler:
             "fast_interval": self.fast_interval,
             "logs_interval": self.logs_interval,
             "logs_updated_at": int(self.logs_updated_at),
-            "logs_stale": self.logs_stale,
+            "logs_stale": self.vote_logs_stale or self.session_logs_stale,
+            "power_path_logs_stale": self.power_path_logs_stale,
             "version": VERSION,
             "adb": getattr(self.adb, "serial", None) or "",
             "source": "adb",
@@ -1182,7 +1214,8 @@ class Sampler:
                 "fast_interval": self.fast_interval,
                 "logs_interval": self.logs_interval,
                 "logs_updated_at": int(self.logs_updated_at),
-                "logs_stale": self.logs_stale,
+                "logs_stale": self.vote_logs_stale or self.session_logs_stale,
+                "power_path_logs_stale": self.power_path_logs_stale,
                 "adb": getattr(self.adb, "serial", None) or "",
                 "source": "adb",
                 "device": getattr(self.adb, "serial", None) or "",
@@ -1289,7 +1322,8 @@ class Sampler:
                 "fast_interval": self.fast_interval,
                 "logs_interval": self.logs_interval,
                 "logs_updated_at": int(self.logs_updated_at),
-                "logs_stale": self.logs_stale,
+                "logs_stale": self.vote_logs_stale or self.session_logs_stale,
+                "power_path_logs_stale": self.power_path_logs_stale,
                 "adb": getattr(self.adb, "serial", None) or "",
                 "source": "adb",
                 "device": getattr(self.adb, "serial", None) or "",

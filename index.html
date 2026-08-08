@@ -728,7 +728,10 @@ function renderVoters(d) {
     } else {
       pathLabel = "Buck / CP 未激活（待确认）";
     }
-    summary.push(`<span class="chip" title="由 sc8581 电荷泵 work_mode 判定">当前功率路径<b>${esc(pathLabel)}</b></span>`);
+    const ppStaleW = d.meta && d.meta.power_path_logs_stale;
+    const staleW = ppStaleW
+      ? (cpState === "unknown" ? " · 路径日志读取异常" : " · 数据暂时陈旧") : "";
+    summary.push(`<span class="chip" title="由 sc8581 电荷泵 work_mode 判定${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(pathLabel)}</b><small>${staleW}</small></span>`);
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;
@@ -767,15 +770,20 @@ function renderVoters(d) {
     summary.push(`<span class="chip" title="battery 状态与 real_type">连接类型<b>${esc(connLabel)}</b>${rtShow ? `<small>${esc(rtShow)}</small>` : ""}</span>`);
     if (wiredCharging) {
       const wcp = (d.derived && d.derived.wired_cp) || {};
+      const ppStaleD = d.meta && d.meta.power_path_logs_stale;
       let wPath;
+      let staleD = "";
       if (wcp.state === "cp") {
         wPath = `电荷泵（有线）${wcp.ratio ? " · " + wcp.ratio + ":1" : ""}`;
+        if (ppStaleD) staleD = " · 数据暂时陈旧";
       } else if (wcp.state === "buck") {
         wPath = "Buck 直充（有线）";
+        if (ppStaleD) staleD = " · 数据暂时陈旧";
       } else {
         wPath = "有线功率路径待确认";
+        if (ppStaleD) staleD = " · 路径日志读取异常";
       }
-      summary.push(`<span class="chip" title="有线 CP 状态：sc8581 operation mode + quickchg work_mode/ratio + cur_work_cp">当前功率路径<b>${esc(wPath)}</b></span>`);
+      summary.push(`<span class="chip" title="有线 CP 状态：sc8581 operation mode + quickchg work_mode/ratio + cur_work_cp${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(wPath)}</b><small>${staleD}</small></span>`);
     }
     const battMa = d.derived && d.derived.batt_current_ma;
     const dec = buck && buck.cur_max_decision;
