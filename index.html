@@ -825,40 +825,19 @@ function renderVoters(d) {
   // EPP+/QC 阶段 wls_icl 与 iout 属于不同控制域，禁止比较
   const iclBad = wlsMode === "bpp_drawload" && buck && buck.icl !== undefined && buck.icl !== null
     ? iclNotEffective(buck.icl, ioutNow) : false;
-  // 无线输入限流/仲裁：按 work_mode 阶段做时效判定——
-  // ICL/effective 必须晚于最近一次 work_mode 变化才算当前路径数据；
-  // 旧值降级为历史，避免 4:1 → 1:1 后沿用上一阶段的 ICL
+  // 总仲裁无线输入项：永远以 wireless_buck_input 的 MCA effective 为准（fresh 判定按 work_mode 阶段）；
+  // wireless loop ICL 是执行层下发值，只进详情卡做对照，绝不反推为仲裁结果
   if (chargingNow && wirelessActive && buck) {
     const workMs = buck.wls_work_mode_ms || 0;
-    const iclMs = buck.icl_ms || 0;
-    const iclFresh = buck.icl !== null && buck.icl !== undefined
-      && (!workMs || iclMs >= workMs);
     const effFresh = mcaEff && mcaEff.r_ms !== null && mcaEff.r_ms !== undefined
       && (!workMs || mcaEff.r_ms >= workMs);
-    if (iclFresh) {
-      const wlsClient = (mcaEff && effFresh && mcaEff.client) || "icl";
-      const wlsValue = buck.icl;
-      const chain = mcaEff
-        ? `${esc(mcaEff.client)} → wireless_buck_input=${mcaEff.value} → wireless loop icl=${buck.icl}（驱动实际下发）`
-        : `wireless loop icl=${buck.icl}（驱动实际下发）`;
-      let tip = chain;
-      let modeTag = " · 已生效";
-      if (iclBad) {
-        tip += "；BPP 同域电流持续远超该限流，疑似未生效（见卡片状态）";
-        modeTag = " · 疑似未生效";
-      } else if (buck.chg_en === 0) {
-        tip += "；已仲裁并下发，chg_en=0，当前非实际电流瓶颈";
-        modeTag = " · 已生效·充电暂停";
-      } else {
-        tip += "；已仲裁并下发至 wireless loop";
-      }
-      summary.push(`<span class="chip"${iclBad ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="${tip}">` +
-        `无线输入限流<b>${wlsValue}</b><small>${esc(wlsClient)}${modeTag}</small></span>`);
-    } else if (effFresh) {
-      summary.push(`<span class="chip" title="wireless_buck_input 仲裁结果（当前 work_mode 之后新产生）；当前路径尚未捕获新的 wireless loop ICL">` +
-        `无线输入仲裁<b>${fmt(mcaEff.value, 0)}</b><small>${esc(mcaEff.client)} · 当前路径尚未捕获新的实际下发 ICL</small></span>`);
+    if (effFresh) {
+      const pauseTag = buck.chg_en === 0 ? " · 充电暂停" : "";
+      summary.push(`<span class="chip" title="wireless_buck_input MCA 仲裁结果（当前 work_mode 后新产生）；执行层 ICL 见详情卡">` +
+        `无线输入仲裁<b>${fmt(mcaEff.value, 0)}</b><small>${esc(mcaEff.client)}${pauseTag}</small></span>`);
     } else {
-      summary.push(`<span class="chip" title="当前 work_mode 之后尚无新的 ICL 或仲裁结果，不沿用上一阶段历史值">无线输入限流<b>--</b><small>当前 ${buck.cp_ratio || ""}:1 路径尚无新控制结果</small></span>`);
+      summary.push(`<span class="chip" title="当前 work_mode 后尚未捕获新的 wireless_buck_input effective；执行层 ICL 不反推仲裁结果">` +
+        `无线输入仲裁<b>--</b><small>未捕获当前 effective</small></span>`);
     }
   }
   if (chargingNow) {
@@ -1014,8 +993,11 @@ function renderVoters(d) {
       : "";
     let resultText = "";
     if (resultValid(b)) {
+      const effOld = (b.wls_work_mode_ms || 0) > 0 && (b.result.r_ms || 0) < (b.wls_work_mode_ms || 0);
       resultText = `<span class="vote-result" title="驱动 effective vote is now">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}` +
-        `${b.result.time ? `<small> · ${esc(b.result.time)}</small>` : ""}</span>`;
+        `${b.result.time ? `<small> · ${esc(b.result.time)}</small>` : ""}${effOld ? `<small> · 历史（work_mode 前）</small>` : ""}</span>`;
+    } else if (t === "wireless_buck_input") {
+      resultText = `<span class="vote-result" title="未捕获 mca_vote effective 行，不以执行层 ICL 反推仲裁">仲裁结果 <b>--</b><small>未捕获当前 effective</small></span>`;
     } else if ((b.policy === "MIN" || b.policy === "MAX") && b.unit === "mA" && rows.length) {
       const enabled = rows.filter(r => r.enable === 1);
       if (enabled.length) {
@@ -1058,13 +1040,25 @@ function renderVoters(d) {
       } else {
         modeText = `<span class="vote-result" title="无线控制模式未知">控制模式 <b>待确认</b></span>`;
       }
-      // 生效三态：已仲裁并下发 → 已生效；chg_en=0 → 已生效但非瓶颈；同域矛盾 → 疑似未生效
+      // 生效三态 + 仲裁/执行一致性：chg_en=0 → 暂停；同域矛盾 → 疑似未生效；
+      // 两者都新鲜时比较 effective 与 ICL 是否一致，执行值更低说明下游另有约束
+      const effVal = resultValid(b) ? b.result.value : null;
+      const iclVal = (b.icl !== null && b.icl !== undefined) ? b.icl : null;
+      const iclOld = (b.wls_work_mode_ms || 0) > 0 && (b.icl_ms || 0) < (b.wls_work_mode_ms || 0);
       if (iclBad) {
         modeText += `<span class="vote-result" style="color:var(--amber)">状态 <b>疑似未生效</b><small>BPP 同域电流持续超过 ICL</small></span>`;
       } else if (b.chg_en === 0) {
         modeText += `<span class="vote-result">状态 <b>已生效 · 当前充电暂停</b><small>chg_en=0，限流非当前瓶颈</small></span>`;
-      } else if (b.icl !== null && b.icl !== undefined) {
-        modeText += `<span class="vote-result">状态 <b>已生效 · 已下发</b><small>effective → wireless loop icl</small></span>`;
+      } else if (iclVal !== null && effVal !== null && !iclOld) {
+        const delta = iclVal - effVal;
+        const eq = delta === 0;
+        modeText += `<span class="vote-result"${delta < 0 ? ' style="color:var(--amber)"' : ""}>状态 <b>${eq ? "仲裁与执行一致" : delta < 0 ? "执行值低于仲裁值" : "执行值高于仲裁值"}</b><small>仲裁 ${effVal}mA / 执行 ICL ${iclVal}mA${delta < 0 ? " · 下游另有约束" : ""}</small></span>`;
+      } else if (effVal !== null) {
+        modeText += `<span class="vote-result">状态 <b>已生效（仲裁）</b><small>当前路径 ICL 待捕获</small></span>`;
+      } else if (iclVal !== null) {
+        modeText += `<span class="vote-result">状态 <b>已下发（未捕获仲裁）</b><small>执行 ICL ${iclVal}mA，effective 待捕获</small></span>`;
+      } else {
+        modeText += `<span class="vote-result">状态 <b>待确认</b><small>无有效 ICL / effective</small></span>`;
       }
       const xmWls = (b.rows || []).find(r => r.client === "xm_wls");
       if (xmWls && xmWls.enable === 1) {
