@@ -641,6 +641,53 @@ def parse_quick_cur_decision(text: str, offset_minutes: int = 0) -> dict | None:
     return result
 
 
+def parse_session_cp_state(text: str, offset_minutes: int = 0):
+    """按会话解析 CP 状态：遇到 power_good_on/off 重置，只保留当前会话内的
+    sc8581 模式、分压比与 select_max_ibat 决策，避免上一会话残留冒充当前值。"""
+    cp_mode: int | None = None
+    cp_work_mode: int | None = None
+    decision: dict | None = None
+    inputs: dict | None = None
+    boundary_seen = False
+    for line in text.splitlines():
+        if "power_good_on" in line or "power_good_off" in line:
+            boundary_seen = True
+            cp_mode = None
+            cp_work_mode = None
+            decision = None
+            inputs = None
+            continue
+        m = re.search(r"set operation mode (\d+)", line)
+        if m:
+            cp_mode = int(m.group(1))
+            continue
+        m = re.search(r"select_cur_work_mode:.*work_mode=(\d+)", line)
+        if m:
+            cp_work_mode = int(m.group(1))
+            continue
+        m = re.search(
+            r"select_max_ibat:445 \[channel_cur:(\d+)\], \[temp_max_cur:(\d+)\], "
+            r"\[tx_adapter_max:(\d+)\], \[sw_qc_ichg:(\d+)\],\[sw_thermal_ichg:(\d+)\]",
+            line)
+        if m:
+            tm = VOTE_TIME_RE.search(line)
+            inputs = {
+                "channel_cur": int(m.group(1)),
+                "temp_max_cur": int(m.group(2)),
+                "tx_adapter_max": int(m.group(3)),
+                "sw_qc_ichg": int(m.group(4)),
+                "sw_thermal_ichg": int(m.group(5)),
+                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "at": int(time.time() * 1000),
+            }
+            continue
+        m2 = re.search(r"select_max_ibat:446 cur_max:\[Final\]: (\d+)", line)
+        if m2 and inputs is not None:
+            decision = dict(inputs)
+            decision["final"] = int(m2.group(1))
+    return cp_mode, cp_work_mode, decision, boundary_seen
+
+
 def is_last_wireless_power_off(text: str) -> bool:
     """True if the last wireless power event is removal (power_good_off)."""
     return (
@@ -920,16 +967,20 @@ class Sampler:
                 buck_fcc = parse_buck_fcc(session_log)
                 if buck_fcc is not None:
                     self.last_buck_fcc = buck_fcc
-                cp_mode = parse_cp_mode(session_log)
-                if cp_mode is not None:
-                    self.last_cp_mode = cp_mode
-                cp_work_mode = parse_cp_work_mode(session_log)
-                if cp_work_mode is not None:
-                    self.last_cp_work_mode = cp_work_mode
-                cur_decision = parse_quick_cur_decision(
+                cp_mode, cp_work_mode, cur_decision, boundary_seen = parse_session_cp_state(
                     session_log, self.adb.utc_offset_minutes)
-                if cur_decision is not None:
+                if boundary_seen:
+                    # 窗口内有会话切换：以本次解析为准，没有新行就清空旧状态
+                    self.last_cp_mode = cp_mode
+                    self.last_cp_work_mode = cp_work_mode
                     self.last_cur_decision = cur_decision
+                else:
+                    if cp_mode is not None:
+                        self.last_cp_mode = cp_mode
+                    if cp_work_mode is not None:
+                        self.last_cp_work_mode = cp_work_mode
+                    if cur_decision is not None:
+                        self.last_cur_decision = cur_decision
 
         self.logs_stale = not vote_read_ok or not session_read_ok
         self.logs_updated_at = time.time() * 1000
