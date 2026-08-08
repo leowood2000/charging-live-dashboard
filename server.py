@@ -502,8 +502,9 @@ VOTE_POLICIES = {
     "wireless_auth_magnet_30w": "MIN",
     "wireless_sw_qc_ich": "MIN",
     "wireless_sw_thermal_ich": "MIN",
-    # 项目配置（用户确认）：有线 buck 充电电流按 MIN 推算
-    "buck_charge_curr": "MIN",
+    # 项目假设（用户确认，未从 .ko 独立核实）：有线 buck 充电电流按 MIN 推算，
+    # 无 effective 行时只允许“参考推算”，不进入总仲裁 fallback
+    "buck_charge_curr": "MIN_ASSUMED",
     # mca_quick_wireless.ko：wls_single/multi_chg_cur 为 MIN，disable 为 type2（首个非零）
     "wls_single_chg_cur": "MIN",
     "wls_multi_chg_cur": "MIN",
@@ -1162,6 +1163,10 @@ class Sampler:
         # 无线控制模式与 RX 输出电流上限（bpp drawload / epp_plus/QC）
         self.last_wls_mode = "unknown"
         self.last_rx_iout_limit: int | None = None
+        # 日志行 stable key：同一行重复扫描不刷新 at（log_time + 关键值）
+        self.last_cur_decision_key: tuple | None = None
+        self.last_wired_cur_max_key: tuple | None = None
+        self.last_wired_stage_cur_max_key: tuple | None = None
 
     def start(self) -> None:
         threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
@@ -1264,14 +1269,17 @@ class Sampler:
                 self.last_cp_mode = None
                 self.last_cp_work_mode = None
                 self.last_cur_decision = None
+                self.last_cur_decision_key = None
                 self.last_wls_mode = "unknown"
                 self.last_rx_iout_limit = None
             else:
-                wm = parse_wireless_mode(
-                    split_after_last_wireless_attach(session_log))
+                # 所有无线执行层数据统一按最近一次 power_good_on 截断，
+                # 避免上一会话的 ICL/buck_fcc 混进新会话
+                wtail = split_after_last_wireless_attach(session_log)
+                wm = parse_wireless_mode(wtail)
                 self.last_wls_mode = wm["mode"]
                 self.last_rx_iout_limit = wm["rx_iout_limit"]
-                icl = parse_wls_icl(session_log, self.adb.utc_offset_minutes)
+                icl = parse_wls_icl(wtail, self.adb.utc_offset_minutes)
                 if icl is not None:
                     value, log_time = icl
                     new_key = (value, log_time)
@@ -1281,14 +1289,20 @@ class Sampler:
                         self.last_wls_icl = value
                         self.last_wls_icl_log_time = log_time
                         self.last_wls_icl_at = int(time.time() * 1000)
-                buck_fcc = parse_buck_fcc(session_log)
+                buck_fcc = parse_buck_fcc(wtail)
                 if buck_fcc is not None:
                     self.last_buck_fcc = buck_fcc
         # 功率路径：高频信号专用通道（手机端已 tail -n 200 封顶）
         if pp_read_ok and pp_log.strip():
-            quick_cur_max = parse_quick_cur_max(pp_log)
-            if quick_cur_max is not None:
-                self.last_quick_cur_max = quick_cur_max
+            # quick wireless cur_max 同样只取最近一次无线会话之后，
+            # 断开时保持清空，避免旧窗口里的 Final 又被写回
+            if is_last_wireless_power_off(pp_log):
+                self.last_quick_cur_max = None
+            else:
+                wt = split_after_last_wireless_attach(pp_log)
+                quick_cur_max = parse_quick_cur_max(wt)
+                if quick_cur_max is not None:
+                    self.last_quick_cur_max = quick_cur_max
             state = parse_session_cp_state(pp_log, self.adb.utc_offset_minutes)
             w_cp_mode, w_cp_work_mode, w_decision, w_boundary = state["wireless"]
             (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
@@ -1332,13 +1346,18 @@ class Sampler:
                 self.last_cp_mode = w_cp_mode
                 self.last_cp_work_mode = w_cp_work_mode
                 self.last_cur_decision = w_decision
+                self.last_cur_decision_key = None
             else:
                 if w_cp_mode is not None:
                     self.last_cp_mode = w_cp_mode
                 if w_cp_work_mode is not None:
                     self.last_cp_work_mode = w_cp_work_mode
                 if w_decision is not None:
-                    self.last_cur_decision = w_decision
+                    key = (w_decision.get("log_time", ""),
+                           w_decision.get("final"))
+                    if key != self.last_cur_decision_key:
+                        self.last_cur_decision_key = key
+                        self.last_cur_decision = w_decision
             # 有线 track：usb online / real_type changed 边界
             if d_boundary:
                 self.last_wired_state = d_state
@@ -1347,6 +1366,8 @@ class Sampler:
                 self.last_wired_buck = d_buck
                 self.last_wired_cur_max = d_cur_max
                 self.last_wired_stage_cur_max = d_stage_cur_max
+                self.last_wired_cur_max_key = None
+                self.last_wired_stage_cur_max_key = None
             else:
                 if d_state != "unknown":
                     self.last_wired_state = d_state
@@ -1357,9 +1378,17 @@ class Sampler:
                 if d_buck:
                     self.last_wired_buck = True
                 if d_cur_max is not None:
-                    self.last_wired_cur_max = d_cur_max
+                    key = (d_cur_max.get("log_time", ""),
+                           d_cur_max.get("cur_max"))
+                    if key != self.last_wired_cur_max_key:
+                        self.last_wired_cur_max_key = key
+                        self.last_wired_cur_max = d_cur_max
                 if d_stage_cur_max is not None:
-                    self.last_wired_stage_cur_max = d_stage_cur_max
+                    key = (d_stage_cur_max.get("log_time", ""),
+                           d_stage_cur_max.get("cur_max"))
+                    if key != self.last_wired_stage_cur_max_key:
+                        self.last_wired_stage_cur_max_key = key
+                        self.last_wired_stage_cur_max = d_stage_cur_max
 
         self.logs_updated_at = time.time() * 1000
         # 复制、合并日志缓存、发布在同一个锁内完成，避免旧快照覆盖新快照

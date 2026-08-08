@@ -815,20 +815,15 @@ function renderVoters(d) {
     const ppStaleW = d.meta && d.meta.power_path_logs_stale;
     const staleW = ppStaleW
       ? (cpState === "unknown" ? " · 路径日志读取异常" : " · 数据暂时陈旧") : "";
-    summary.push(`<span class="chip" title="由 sc8581 电荷泵 work_mode 判定${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(pathLabel)}</b><small>${staleW}</small></span>`);
+    summary.push(`<span class="chip" title="由电荷泵 operation mode/work_mode 判定（内核日志符号 sc8581，OSS 设备树节点 SC8585）${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(pathLabel)}</b><small>${staleW}</small></span>`);
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;
-  const vrectNow = d.derived && d.derived.vrect !== null && d.derived.vrect !== undefined
-    ? d.derived.vrect : null;
-  const vbatNow = d.derived && d.derived.batt_voltage_mv !== null && d.derived.batt_voltage_mv !== undefined
-    ? d.derived.batt_voltage_mv : null;
-  // 物理一致性：icl 是无线 buck 输入侧限流，输出 iout 上限 ≈ icl × vrect / vbat
+  // BPP drawload 阶段 iwls 与 iout 同域，直接比较实际 RX 输出电流与 ICL；
+  // Vrect/Vbat 折算只适用于“输入侧 ICL → 电池侧 Ibat”的功率守恒比较，不用于此处
   const iclNotEffective = (icl, iout) => {
     if (icl === null || icl === undefined || iout === null || iout === undefined) return false;
-    if (!vrectNow || !vbatNow || vbatNow <= 0) return Math.abs(icl - iout) > 200;
-    const expectMax = icl * vrectNow / vbatNow;
-    return iout > expectMax * 1.25 + 50;
+    return iout > icl * 1.15 + 100;
   };
   const wlsMode = buck && buck.wls_mode;
   // 只有 BPP drawload 阶段 iwls 与 iout 同域，才做一致性检查；
@@ -878,7 +873,7 @@ function renderVoters(d) {
         wPath = "有线功率路径待确认";
         if (ppStaleD) staleD = " · 路径日志读取异常";
       }
-      summary.push(`<span class="chip" title="有线 CP 状态：sc8581 operation mode + quickchg work_mode/ratio + cur_work_cp${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(wPath)}</b><small>${staleD}</small></span>`);
+      summary.push(`<span class="chip" title="有线 CP 状态：电荷泵 operation mode + quickchg work_mode/ratio + cur_work_cp（内核日志符号 sc8581，设备树 SC8585）${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(wPath)}</b><small>${staleD}</small></span>`);
       if (wcp.state === "cp") {
         // 有线 CP：Quick Charge 算法目标（1611 型 cur_max 优先，1597 型阶段值兜底），绝不用 buck_charge_curr 顶替
         if (!ceStopped) {
@@ -974,11 +969,6 @@ function renderVoters(d) {
         summary.push(`<span class="chip"${stale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} ` +
           `title="quick wireless select_max_ibat 的最终电池电流目标（非 MCA votable）${dec.log_time ? " · 日志 " + esc(dec.log_time) : ""}">` +
           `电池侧算法上限<b>${dec.final}</b><small>quick_wireless cur_max${decAge !== null ? " · " + decAge + "s前" : ""}${stale ? " · 历史值/待刷新" : ""}</small></span>`);
-        const swEff = effectiveOf(topics.wireless_sw_thermal_ich);
-        if (swEff && swEff.value !== dec.final) {
-          summary.push(`<span class="chip" title="热控投票已更新，quick wireless 尚未重新输出 cur_max Final，等待收敛">` +
-            `最新限制候选<b>${swEff.value}</b><small>${esc(swEff.client)}${logsAge !== null ? " · " + logsAge + "s前" : ""} · 等待收敛</small></span>`);
-        }
       } else if (buck && buck.actual_limit !== null && buck.actual_limit !== undefined) {
         const src = buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc";
         summary.push(`<span class="chip" title="电池侧充电电流上限（quick_wireless cur_max / buck_fcc）">电池侧算法上限<b>${buck.actual_limit}</b><small>${esc(src)}</small></span>`);
@@ -1035,6 +1025,12 @@ function renderVoters(d) {
         const pick = enabled.reduce((a, r) =>
           b.policy === "MAX" ? (r.value > a.value ? r : a) : (r.value < a.value ? r : a));
         resultText = `<span class="vote-result calc" title="驱动未输出 effective 行，按已核实 policy=${b.policy} 推算">理论${b.policy} <b>${esc(pick.client)}</b> → ${pick.value}${b.unit}</span>`;
+      }
+    } else if (b.policy === "MIN_ASSUMED" && b.unit === "mA" && rows.length) {
+      const enabled = rows.filter(r => r.enable === 1);
+      if (enabled.length) {
+        const pick = enabled.reduce((a, r) => (r.value < a.value ? r : a));
+        resultText = `<span class="vote-result calc" title="项目假设 MIN（未从 .ko 独立核实），仅供参考，不进入总仲裁 fallback">参考推算 <b>${esc(pick.client)}</b> → ${pick.value}${b.unit}</span>`;
       }
     } else if (!resultValid(b)) {
       resultText = `<span class="vote-result calc" title="未捕获驱动 effective 行，且该主题仲裁类型未知，不做推算">未捕获驱动 effective 行</span>`;

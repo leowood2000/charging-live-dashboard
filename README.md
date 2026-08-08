@@ -6,7 +6,7 @@
 
 - **双周期采集**：快速采集 3 秒（sysfs 节点、battery uevent、thermal.dump、历史曲线），日志采集 10 秒（投票表、会话、EPP、实际下发 ICL），避免每 3 秒重扫几 MB 日志
 - **电流符号统一**：充电为正、放电为负，`Not charging` 也按放电处理；电池功率保留正负号；原始 JSON 仍保留内核原值方便排查
-- **MCA 仲裁移植**：支持 `voting on/off`、完整 client 字符集、单位白名单（未知主题不默认 mA）、已反汇编核实的 `VOTE_POLICIES`（MIN / FIRST_NONZERO / FIRST_ZERO / UNKNOWN）、按主题缓存 `changed`/`result`
+- **MCA 仲裁移植**：支持 `voting on/off`、完整 client 字符集、单位白名单（未知主题不默认 mA）、`VOTE_POLICIES`（大部分来自 .ko 反汇编核实；`buck_charge_curr` 为项目假设 `MIN_ASSUMED`，仅详情卡“参考推算”）、按主题缓存 `changed`/`result`
 - **总仲裁只显示实际结果**：无线输入限流在仲裁值未生效（icl 与 iout 违反物理功率比）时，chip 改为“实际约束限流”并显示电池侧真正约束电流的限流（quick_wireless `cur_max:[Final]` / `buck_fcc`），不再误标为无线输入电流；ICL / iout 细节保留在投票详情卡
 - **投票区只显示生效主题**：有启用票或驱动已给出实际结果的主题才显示卡片
 - `wireless_auth_*`（20w/30w/50w/80w/voice_box/magnet）与 `wireless_bpp/bppqc2/bppqc3/epp_in` 是按充电板型号/协议模式预置的热控表，无论连接哪台垫都会被整批投票，已直接隐藏
@@ -115,7 +115,7 @@ python server.py --adb-host 192.168.33.118:5555 --port 8765 --interval 3 --logs-
 ### 投票仲裁
 
 - `VOTE_UNITS`：只有已核实的电流主题才标注 `mA`，未知主题默认空单位
-- `VOTE_POLICIES`：来自 miro 固件 .ko 反汇编核实的仲裁类型（MIN / FIRST_NONZERO / FIRST_ZERO / UNKNOWN）
+- `VOTE_POLICIES`：大部分来自 miro 固件 .ko 反汇编核实（MIN / FIRST_NONZERO / FIRST_ZERO / UNKNOWN）；`buck_charge_curr` 为项目假设 `MIN_ASSUMED`，无 effective 行时只允许详情卡“参考推算”，不进入总仲裁 fallback
 - `changed`/`result` 按主题分别缓存，日志交错时不会串线；`voting off` 正确解析为 `enabled: false`
 - MCA `effective vote is now` 是逻辑仲裁结果；`wireless loop icl` 是实际下发值；`wls_debug iout` 是实时测量值，三者互不覆盖
 
