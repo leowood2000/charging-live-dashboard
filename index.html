@@ -687,9 +687,15 @@ function renderVoters(d) {
           : buck.cp_ratio === 4 ? "4:1（div4）"
           : buck.cp_ratio + ":1")
       : "";
-    const pathLabel = buck && buck.cp_active
-      ? `电荷泵（Quick Wireless）${ratio ? " · " + ratio : ""}`
-      : "Buck 直充（无线）";
+    const cpState = buck && buck.cp_state;
+    let pathLabel;
+    if (cpState === "cp") {
+      pathLabel = `电荷泵（Quick Wireless）${ratio ? " · " + ratio : ""}`;
+    } else if (cpState === "buck") {
+      pathLabel = "Buck 直充（无线）";
+    } else {
+      pathLabel = "Buck / CP 未激活（待确认）";
+    }
     summary.push(`<span class="chip" title="由 sc8581 电荷泵 work_mode 判定">当前功率路径<b>${esc(pathLabel)}</b></span>`);
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined

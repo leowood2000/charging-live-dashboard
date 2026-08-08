@@ -1020,8 +1020,14 @@ class Sampler:
                 buck["actual_limit_source"] = (
                     "quick_wireless cur_max" if self.last_quick_cur_max is not None
                     else "wireless loop buck_fcc")
-            buck["cp_active"] = bool(self.last_cp_mode and self.last_cp_mode > 0)
-            if self.last_cp_work_mode is not None:
+            cp_mode = self.last_cp_mode
+            # 三态：cp（本会话 operation mode>0）/ buck（本会话明确 mode=0）/ unknown（无新日志待确认）
+            if cp_mode is not None:
+                buck["cp_state"] = "cp" if cp_mode > 0 else "buck"
+            else:
+                buck["cp_state"] = "unknown"
+            buck["cp_active"] = bool(cp_mode and cp_mode > 0)
+            if cp_mode is not None and cp_mode > 0 and self.last_cp_work_mode is not None:
                 buck["cp_ratio"] = self.last_cp_work_mode
             if self.last_cur_decision is not None:
                 buck["cur_max_decision"] = copy.deepcopy(self.last_cur_decision)
