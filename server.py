@@ -297,6 +297,7 @@ class AdbReader:
             fname = out.strip().splitlines()[0]
             if not re.fullmatch(r"[A-Za-z0-9_.\-]+", fname):
                 return False, ""
+            self.last_log_fname = fname
             path = f"{MCA_LOG_DIR}/{fname}"
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"tail -c {tail_bytes} {path} | grep -a -E \'mca_vote\'"'],
@@ -333,6 +334,7 @@ class AdbReader:
             files = list(reversed(files))
             if not files:
                 return False, ""
+            self.last_log_fname = files[-1]
             script = "; ".join(
                 f"tail -c {tail_bytes} {MCA_LOG_DIR}/{f} | grep -a -E '{pattern}' | grep -v sysfs_show"
                 for f in files)
@@ -369,6 +371,7 @@ class AdbReader:
             fname = out.strip().splitlines()[0].strip()
             if not re.fullmatch(r"[A-Za-z0-9_.\-]+", fname):
                 return False, ""
+            self.last_log_fname = fname
             path = f"{MCA_LOG_DIR}/{fname}"
             script = (f"tail -c {tail_bytes} {path} | grep -a -E '{pattern}' "
                       f"| tail -n {tail_lines}")
@@ -534,7 +537,31 @@ def shift_log_time(time_str: str, offset_minutes: int) -> str:
     return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}:{m.group(4)}"
 
 
-def parse_vote_blocks(text: str, offset_minutes: int = 0) -> dict:
+LOG_FILE_RE = re.compile(r"mca_log_(\d{2})(\d{2})_(\d{2})(\d{2})\.log")
+
+
+def abs_log_ms(fname: str, time_str: str) -> int:
+    """日志行时间（已 shift 为本地）→ 归一化绝对毫秒：文件名日期 + 行内时刻，跨文件单调。
+
+    用于比较 ICL / effective 与最近一次 work_mode 变化的先后，
+    避免跨 00:00 或跨多个日志文件时字符串时间比较翻转。
+    """
+    base = datetime.now().date()
+    m = LOG_FILE_RE.search(fname or "")
+    if m:
+        base = datetime(datetime.now().year, int(m.group(1)), int(m.group(2))).date()
+    base_ms = int(datetime.combine(base, datetime.min.time()).timestamp() * 1000)
+    p = time_str.split(":")
+    if len(p) < 4:
+        return base_ms
+    try:
+        secs = int(p[0]) * 3600 + int(p[1]) * 60 + int(p[2])
+        return base_ms + secs * 1000 + int(p[3])
+    except ValueError:
+        return base_ms
+
+
+def parse_vote_blocks(text: str, offset_minutes: int = 0, fname: str = "") -> dict:
     """Parse the latest mca_vote table per topic from mca_log output.
 
     changed/result 按主题分别缓存，避免日志交错时 A 主题的结果被挂到 B 主题。
@@ -557,10 +584,12 @@ def parse_vote_blocks(text: str, offset_minutes: int = 0) -> dict:
         m = VOTE_RESULT_RE.search(line)
         if m:
             tm = VOTE_TIME_RE.search(line)
+            t = shift_log_time(tm.group(1), offset_minutes) if tm else ""
             results_by_topic[m.group(1)] = {
                 "topic": m.group(1), "value": int(m.group(2)),
                 "client": m.group(3), "idx": int(m.group(4)),
-                "time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "time": t,
+                "r_ms": abs_log_ms(fname, t) if t else 0,
             }
             continue
         m = VOTE_HEADER_RE.search(line)
@@ -605,11 +634,12 @@ def parse_epp_status(text: str) -> str | None:
     return last
 
 
-def parse_wls_icl(text: str, offset_minutes: int = 0) -> tuple[int, int, str] | None:
+def parse_wls_icl(text: str, offset_minutes: int = 0, fname: str = "") -> tuple[int, int, str, int] | None:
     """Extract the latest wireless loop icl + chg_en (driver-applied state).
 
-    Returns (icl, chg_en, shifted local log time) so the frontend can show the
-    value together with its log timestamp and whether charging is enabled.
+    Returns (icl, chg_en, shifted local log time, normalized log ms) so the
+    frontend can show the value together with its timestamp and decide whether
+    it belongs to the current work_mode stage.
     """
     last = None
     for line in text.splitlines():
@@ -617,7 +647,8 @@ def parse_wls_icl(text: str, offset_minutes: int = 0) -> tuple[int, int, str] | 
         if m:
             tm = VOTE_TIME_RE.search(line)
             log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
-            last = (int(m.group(1)), int(m.group(2)), log_time)
+            ms = abs_log_ms(fname, log_time) if log_time else 0
+            last = (int(m.group(1)), int(m.group(2)), log_time, ms)
     return last
 
 
@@ -689,7 +720,7 @@ WIRED_FINAL_CUR_MAX_RE = re.compile(
     r"channel_cur (\d+) thermal_cur (\d+)")
 
 
-def parse_session_cp_state(text: str, offset_minutes: int = 0):
+def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     """无线/有线 CP 状态彻底解耦：
     - power_good 只重置无线 track；usb online / real_type changed 只重置有线 track
     - SC8581 operation mode 只有在对应 quickchg 上下文出现后才写入对应 track
@@ -697,6 +728,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
     # 无线 track（power_good 边界）
     w_cp_mode: int | None = None
     w_cp_work_mode: int | None = None
+    w_cp_work_mode_ms: int | None = None
     w_decision: dict | None = None
     w_inputs: dict | None = None
     w_boundary = False
@@ -719,6 +751,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
             w_boundary = True
             w_cp_mode = None
             w_cp_work_mode = None
+            w_cp_work_mode_ms = None
             w_decision = None
             w_inputs = None
             w_ctx = False
@@ -758,6 +791,10 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
         m = re.search(r"mca_wireless_quick_charge_select_cur_work_mode:.*work_mode=(\d+)", line)
         if m:
             w_cp_work_mode = int(m.group(1))
+            tm = VOTE_TIME_RE.search(line)
+            raw = tm.group(1) if tm else ""
+            w_cp_work_mode_ms = (
+                abs_log_ms(fname, shift_log_time(raw, offset_minutes)) if raw else None)
             continue
         m = re.search(r"update_work_mode_para:.*work_mode: (\d+)", line)
         if m:
@@ -833,7 +870,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
     else:
         d_state = "unknown"
     return {
-        "wireless": (w_cp_mode, w_cp_work_mode, w_decision, w_boundary),
+        "wireless": (w_cp_mode, w_cp_work_mode, w_cp_work_mode_ms, w_decision, w_boundary),
         "wired": (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
                   d_cur_max, d_stage_cur_max),
     }
@@ -1137,7 +1174,8 @@ class Sampler:
         self.last_wls_icl: int | None = None
         self.last_wls_icl_at: int | None = None
         self.last_wls_icl_log_time: str | None = None
-        self.last_wls_icl_key: tuple[int, int, str] | None = None
+        self.last_wls_icl_ms: int | None = None
+        self.last_wls_icl_key: tuple | None = None
         self.last_wls_chg_en: int | None = None
         # quick wireless 最终电池电流目标（CP 快充路径真正约束电流的值），cur_max 缺失时回退 buck_fcc
         self.last_quick_cur_max: int | None = None
@@ -1146,6 +1184,10 @@ class Sampler:
         self.last_cp_mode: int | None = None
         # quick wireless 电荷泵分压比 work_mode（1/2/4）
         self.last_cp_work_mode: int | None = None
+        # 最近一次无线 work_mode 变化行的归一化日志毫秒（跨文件单调）
+        self.last_wls_work_mode_ms: int | None = None
+        # 当前读取的 mca 日志文件名，用于日志时间归一化
+        self.last_log_fname: str = ""
         # select_max_ibat 完整决策（输入 + cur_max Final + 日志时间）
         self.last_cur_decision: dict | None = None
         # 有线功率路径状态：cp / buck / unknown（时间顺序 + CP 证据优先）
@@ -1246,7 +1288,8 @@ class Sampler:
         self.power_path_logs_stale = not pp_read_ok
         # 读取成功但内容为空（如 grep 无匹配）不算失败，仅保留旧数据
         if vote_read_ok and vote_log.strip():
-            parsed_voters = parse_vote_blocks(vote_log, self.adb.utc_offset_minutes)
+            parsed_voters = parse_vote_blocks(
+                vote_log, self.adb.utc_offset_minutes, self.last_log_fname)
             if parsed_voters:
                 self.last_voters = parsed_voters
 
@@ -1263,6 +1306,7 @@ class Sampler:
                 self.last_wls_icl = None
                 self.last_wls_icl_at = None
                 self.last_wls_icl_log_time = None
+                self.last_wls_icl_ms = None
                 self.last_wls_icl_key = None
                 self.last_wls_chg_en = None
                 self.last_epp = None
@@ -1270,6 +1314,7 @@ class Sampler:
                 self.last_buck_fcc = None
                 self.last_cp_mode = None
                 self.last_cp_work_mode = None
+                self.last_wls_work_mode_ms = None
                 self.last_cur_decision = None
                 self.last_cur_decision_key = None
                 self.last_wls_mode = "unknown"
@@ -1281,9 +1326,10 @@ class Sampler:
                 wm = parse_wireless_mode(wtail)
                 self.last_wls_mode = wm["mode"]
                 self.last_rx_iout_limit = wm["rx_iout_limit"]
-                icl = parse_wls_icl(wtail, self.adb.utc_offset_minutes)
+                icl = parse_wls_icl(
+                    wtail, self.adb.utc_offset_minutes, self.last_log_fname)
                 if icl is not None:
-                    value, chg_en, log_time = icl
+                    value, chg_en, log_time, icl_ms = icl
                     new_key = (value, chg_en, log_time)
                     # 同一日志行重复扫描时不刷新“几秒前”，避免旧值伪装成新值
                     if new_key != self.last_wls_icl_key:
@@ -1291,6 +1337,7 @@ class Sampler:
                         self.last_wls_icl = value
                         self.last_wls_chg_en = chg_en
                         self.last_wls_icl_log_time = log_time
+                        self.last_wls_icl_ms = icl_ms
                         self.last_wls_icl_at = int(time.time() * 1000)
                 buck_fcc = parse_buck_fcc(wtail)
                 if buck_fcc is not None:
@@ -1306,8 +1353,10 @@ class Sampler:
                 quick_cur_max = parse_quick_cur_max(wt)
                 if quick_cur_max is not None:
                     self.last_quick_cur_max = quick_cur_max
-            state = parse_session_cp_state(pp_log, self.adb.utc_offset_minutes)
-            w_cp_mode, w_cp_work_mode, w_decision, w_boundary = state["wireless"]
+            state = parse_session_cp_state(
+                pp_log, self.adb.utc_offset_minutes, self.last_log_fname)
+            (w_cp_mode, w_cp_work_mode, w_cp_work_mode_ms,
+             w_decision, w_boundary) = state["wireless"]
             (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
              d_cur_max, d_stage_cur_max) = state["wired"]
             # 有线输入遥测：只解析最后一次会话边界之后的日志段；
@@ -1348,6 +1397,7 @@ class Sampler:
             if w_boundary:
                 self.last_cp_mode = w_cp_mode
                 self.last_cp_work_mode = w_cp_work_mode
+                self.last_wls_work_mode_ms = w_cp_work_mode_ms
                 self.last_cur_decision = w_decision
                 self.last_cur_decision_key = None
             else:
@@ -1355,6 +1405,8 @@ class Sampler:
                     self.last_cp_mode = w_cp_mode
                 if w_cp_work_mode is not None:
                     self.last_cp_work_mode = w_cp_work_mode
+                    if w_cp_work_mode_ms is not None:
+                        self.last_wls_work_mode_ms = w_cp_work_mode_ms
                 if w_decision is not None:
                     key = (w_decision.get("log_time", ""),
                            w_decision.get("final"))
@@ -1422,6 +1474,7 @@ class Sampler:
                 buck["icl"] = self.last_wls_icl
                 buck["icl_time"] = self.last_wls_icl_log_time or ""
                 buck["icl_at"] = self.last_wls_icl_at or 0
+                buck["icl_ms"] = self.last_wls_icl_ms or 0
                 if self.last_wls_chg_en is not None:
                     buck["chg_en"] = self.last_wls_chg_en
         buck = core.get("voters", {}).get("wireless_buck_input")
@@ -1441,6 +1494,8 @@ class Sampler:
             buck["cp_active"] = bool(cp_mode and cp_mode > 0)
             if cp_mode is not None and cp_mode > 0 and self.last_cp_work_mode is not None:
                 buck["cp_ratio"] = self.last_cp_work_mode
+            if self.last_wls_work_mode_ms is not None:
+                buck["wls_work_mode_ms"] = self.last_wls_work_mode_ms
             if self.last_cur_decision is not None:
                 buck["cur_max_decision"] = copy.deepcopy(self.last_cur_decision)
             # 无线控制模式：BPP drawload 同域可比较；EPP+/QC 不同域不可比较

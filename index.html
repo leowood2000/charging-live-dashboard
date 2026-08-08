@@ -825,15 +825,21 @@ function renderVoters(d) {
   // EPP+/QC 阶段 wls_icl 与 iout 属于不同控制域，禁止比较
   const iclBad = wlsMode === "bpp_drawload" && buck && buck.icl !== undefined && buck.icl !== null
     ? iclNotEffective(buck.icl, ioutNow) : false;
-  // 无线输入限流：MCA effective → wireless loop icl 已仲裁并下发，进入总仲裁；
-  // BPP drawload 才做同域一致性检查；EPP+/QC 不与 iout 直接比较
+  // 无线输入限流/仲裁：按 work_mode 阶段做时效判定——
+  // ICL/effective 必须晚于最近一次 work_mode 变化才算当前路径数据；
+  // 旧值降级为历史，避免 4:1 → 1:1 后沿用上一阶段的 ICL
   if (chargingNow && wirelessActive && buck) {
-    const wlsClient = (mcaEff && mcaEff.client) || "icl";
-    const wlsValue = (buck.icl !== null && buck.icl !== undefined)
-      ? buck.icl : (mcaEff ? mcaEff.value : null);
-    if (wlsValue !== null && wlsValue !== undefined) {
+    const workMs = buck.wls_work_mode_ms || 0;
+    const iclMs = buck.icl_ms || 0;
+    const iclFresh = buck.icl !== null && buck.icl !== undefined
+      && (!workMs || iclMs >= workMs);
+    const effFresh = mcaEff && mcaEff.r_ms !== null && mcaEff.r_ms !== undefined
+      && (!workMs || mcaEff.r_ms >= workMs);
+    if (iclFresh) {
+      const wlsClient = (mcaEff && effFresh && mcaEff.client) || "icl";
+      const wlsValue = buck.icl;
       const chain = mcaEff
-        ? `${esc(mcaEff.client)} → wireless_buck_input=${mcaEff.value} → effective=${mcaEff.value} → wireless loop icl=${buck.icl !== undefined && buck.icl !== null ? buck.icl : "-"}（驱动实际下发）`
+        ? `${esc(mcaEff.client)} → wireless_buck_input=${mcaEff.value} → wireless loop icl=${buck.icl}（驱动实际下发）`
         : `wireless loop icl=${buck.icl}（驱动实际下发）`;
       let tip = chain;
       let modeTag = " · 已生效";
@@ -848,6 +854,11 @@ function renderVoters(d) {
       }
       summary.push(`<span class="chip"${iclBad ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="${tip}">` +
         `无线输入限流<b>${wlsValue}</b><small>${esc(wlsClient)}${modeTag}</small></span>`);
+    } else if (effFresh) {
+      summary.push(`<span class="chip" title="wireless_buck_input 仲裁结果（当前 work_mode 之后新产生）；当前路径尚未捕获新的 wireless loop ICL">` +
+        `无线输入仲裁<b>${fmt(mcaEff.value, 0)}</b><small>${esc(mcaEff.client)} · 当前路径尚未捕获新的实际下发 ICL</small></span>`);
+    } else {
+      summary.push(`<span class="chip" title="当前 work_mode 之后尚无新的 ICL 或仲裁结果，不沿用上一阶段历史值">无线输入限流<b>--</b><small>当前 ${buck.cp_ratio || ""}:1 路径尚无新控制结果</small></span>`);
     }
   }
   if (chargingNow) {
@@ -1025,10 +1036,11 @@ function renderVoters(d) {
     if (b.icl !== undefined && b.icl !== null) {
       const isEpp = b.wls_mode === "epp_qc";
       const ago = b.icl_at ? Math.max(0, Math.round((Date.now() - b.icl_at) / 1000)) : null;
+      const iclOld = (b.wls_work_mode_ms || 0) > 0 && (b.icl_ms || 0) < (b.wls_work_mode_ms || 0);
       let diff = "";
       if (resultValid(b)) diff = ` · Δ${b.icl - b.result.value}mA`;
       iclText = `<span class="vote-result" title="${isEpp ? "EPP+/QC 阶段：wls_icl 是策略控制量，非当前 iout 限流" : "驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）"}">${isEpp ? "wls_icl 控制量" : "实际下发 ICL"} <b>${b.icl}</b>mA` +
-        `<small>${b.icl_time ? esc(b.icl_time) + " " : ""}${ago !== null ? ago + "s前" : ""}${diff}${isEpp ? " · 非当前 iout 限流" : ""}` +
+        `<small>${b.icl_time ? esc(b.icl_time) + " " : ""}${ago !== null ? ago + "s前" : ""}${diff}${iclOld ? " · 历史 ICL（work_mode 前）" : ""}${isEpp ? " · 非当前 iout 限流" : ""}` +
         (iclBad ? ` <span style="color:var(--amber);border:1px solid rgba(251,191,36,.5);border-radius:4px;padding:0 4px">限流未生效</span>` : "") +
         `</small></span>`;
     }
