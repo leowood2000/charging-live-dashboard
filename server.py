@@ -1436,8 +1436,9 @@ class Sampler:
             wired_log_time = ""
             wired_at = None
             wired_stale = False
+        # mV × mA = µW，直接换算成 W（除以 1e6），前端只显示 W
         wired_power = (
-            wired_vbus_mv * wired_ibus_ma / 1000.0
+            wired_vbus_mv * wired_ibus_ma / 1e6
             if wired_vbus_mv is not None and wired_ibus_ma is not None
             else None
         )
