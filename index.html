@@ -122,9 +122,9 @@
   .kv .v small { color: var(--muted); margin-left: 4px; }
   .tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .tiles.batt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  #groups > .card:last-child { grid-column: 1 / -1; }
-  #groups > .card:last-child .tiles.batt { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  #groups > .card:last-child .tiles.batt .tile.wide { grid-column: span 2; }
+  .card.wide { grid-column: 1 / -1; }
+  .card.wide .tiles.batt { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .card.wide .tiles.batt .tile.wide { grid-column: span 2; }
   .tile {
     background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
     padding: 8px 10px; min-width: 0;
@@ -152,7 +152,6 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px; margin-bottom: 16px;
   }
-  #voteTopics > .card:first-child { grid-column: 1 / -1; }
   #liveSessions { grid-template-columns: 1fr; }
   .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
   .chart-card h3 {
@@ -258,27 +257,31 @@
 
   @media (max-width: 900px) {
     body { padding: 14px 14px 36px; }
-    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .grid,
+    .kpis,
+    #groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #voteTopics,
+    #liveSessions,
     .charts { grid-template-columns: 1fr; }
-    #voteTopics > .card:first-child,
-    #groups > .card:last-child { grid-column: auto; }
-    #groups > .card:last-child .tiles.batt {
+    .card.wide .tiles.batt {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-    #groups > .card:last-child .tiles.batt .tile.wide {
+    .card.wide .tiles.batt .tile.wide {
       grid-column: 1 / -1;
     }
   }
 
   @media (max-width: 560px) {
     body { padding: 12px 10px 36px; }
-    .kpis { grid-template-columns: 1fr; }
     .tiles,
     .tiles.batt { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .card { padding: 12px 10px; }
     table { display: block; overflow-x: auto; }
     canvas { height: 100px; }
+  }
+
+  @media (max-width: 320px) {
+    .kpis,
+    .grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -406,7 +409,8 @@ function fmt(v, digits = 0) {
 function srcText(s) {
   if (s === "quick_charge_regulation") return "quickchg regulation";
   if (s === "buckchg_telemetry") return "buckchg telemetry";
-  if (s === "usb_uevent") return "USB uevent（兜底）";
+  if (s === "usb_uevent") return "USB uevent";
+  if (s === "cp_ibus_total") return "CP ibus_total";
   return s || "-";
 }
 function inputSourceHint(d) {
@@ -539,9 +543,9 @@ function renderGroups(d) {
       }
       el.innerHTML = v;
     });
-    ["vbus", "ibus", "power", "src"].forEach(key => {
+    ["vbus", "ibus", "power", "src", "tel"].forEach(key => {
       const el = document.querySelector(`[data-wired="${key}"]`);
-      if (el) el.innerHTML = wiredTileValue(key, d);
+      if (el) el.innerHTML = key === "tel" ? wiredTelValue(d) : wiredTileValue(key, d);
     });
     const tagEl = $("wiredInputTag");
     if (tagEl) {
@@ -569,6 +573,14 @@ function wiredTileValue(key, d) {
   if (key === "vbus") return `<span>${fmt(v / 1000, 2)}<small>V</small></span>`;
   if (key === "ibus") return `<span>${fmt(v, 0)}<small>mA</small></span>`;
   return `<span>${fmt(v, 2)}<small>W</small></span>`;
+}
+
+function wiredTelValue(d) {
+  const tel = (d && d.derived) || {};
+  const ti = tel.wired_tel_ibus_ma;
+  if (!Number.isFinite(ti)) return `<span class="empty">--</span>`;
+  return `${fmt(ti, 0)}<small>mA</small>` +
+    (tel.wired_tel_stale ? '<span class="bad" style="margin-left:4px">陈旧</span>' : "");
 }
 
 function batteryConv(key, raw) {
@@ -613,7 +625,7 @@ function buildGroups(d) {
       ? CHIP_FACTS.map(f =>
           `<div class="tile"><div class="k">${esc(f[0])}</div><div class="v">${esc(f[1])}</div></div>`).join("")
       : "";
-    return `<div class="card"><h2>${esc(name)}<span class="tag">${nodes.length} 项</span></h2>` +
+    return `<div class="card${name === "芯片与系统" ? " wide" : ""}"><h2>${esc(name)}<span class="tag">${nodes.length} 项</span></h2>` +
       `<div class="tiles">${tiles}${extra}</div></div>`;
   });
 
@@ -630,6 +642,7 @@ function buildGroups(d) {
       `<div class="tiles"><div class="tile"><div class="k">有线输入电压<small>VBUS</small></div><div class="v" data-wired="vbus">${wiredTileValue("vbus", d)}</div></div>` +
       `<div class="tile"><div class="k">有线输入电流<small>IBUS</small></div><div class="v" data-wired="ibus">${wiredTileValue("ibus", d)}</div></div>` +
       `<div class="tile"><div class="k">有线输入功率<small>VBUS×IBUS</small></div><div class="v" data-wired="power">${wiredTileValue("power", d)}</div></div>` +
+      `<div class="tile wide"><div class="k">遥测校验<small>策略日志 ibus · ${esc(tel.wired_tel_source ? srcText(tel.wired_tel_source) : "-")}</small></div><div class="v" data-wired="tel">${wiredTelValue(d)}</div></div>` +
       `<div class="tile wide"><div class="k">测量来源<small>wired_input_source</small></div><div class="v" data-wired="src">${wiredTileValue("src", d)}</div></div></div></div>`);
   }
 
@@ -644,7 +657,7 @@ function buildGroups(d) {
     return `<div class="tile${wide ? " wide" : ""}"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
       `<div class="v" data-batt="${key}">${v}</div></div>`;
   }).join("");
-  cards.push(`<div class="card"><h2>电池标准属性<span class="tag">battery uevent</span></h2>` +
+  cards.push(`<div class="card wide"><h2>电池标准属性<span class="tag">battery uevent</span></h2>` +
     `<div class="tiles batt">${battRows}</div></div>`);
   $("groups").innerHTML = cards.join("");
 }
@@ -822,8 +835,8 @@ function renderVoters(d) {
   // EPP+/QC 阶段 wls_icl 与 iout 属于不同控制域，禁止比较
   const iclBad = wlsMode === "bpp" && buck && buck.icl !== undefined && buck.icl !== null
     ? iclNotEffective(buck.icl, ioutNow) : false;
-  // 无线输入限流：优先显示驱动实际下发的 wireless loop icl，证据链 soc_limit → effective → icl
-  if (chargingNow && buck) {
+  // 无线输入限流：仅无线路径显示，避免有线接管后残留无线缓存冒充当前数据
+  if (chargingNow && wirelessActive && buck) {
     const wlsClient = (mcaEff && mcaEff.client) || "icl";
     const wlsValue = (buck.icl !== null && buck.icl !== undefined)
       ? buck.icl : (mcaEff ? mcaEff.value : null);
@@ -846,6 +859,13 @@ function renderVoters(d) {
     const rtRaw = realTypeNode && realTypeNode.value ? String(realTypeNode.value) : "";
     const rtShow = rtRaw && !/^(unknown|未连接（放电中）|未识别（充电中）)$/i.test(rtRaw) ? rtRaw : "";
     summary.push(`<span class="chip" title="battery 状态与 real_type">连接类型<b>${esc(connLabel)}</b>${rtShow ? `<small>${esc(rtShow)}</small>` : ""}</span>`);
+    const battMa = d.derived && d.derived.batt_current_ma;
+    // 充电生效三态：正常充电 / 停止过渡（OFF 但实测仍有电流）/ 已停止（OFF 且电流≈0）
+    const ceEff = effectiveOf(topics.chg_enable);
+    const ibatMag = battMa !== null && battMa !== undefined ? Math.abs(battMa) : Number.NaN;
+    const ceOff = !!ceEff && ceEff.value === 0;
+    const ceStopped = ceOff && Number.isFinite(ibatMag) && ibatMag <= 300;
+    const ceStopping = ceOff && Number.isFinite(ibatMag) && ibatMag > 300;
     if (wiredCharging) {
       const wcp = (d.derived && d.derived.wired_cp) || {};
       const ppStaleD = d.meta && d.meta.power_path_logs_stale;
@@ -862,33 +882,103 @@ function renderVoters(d) {
         if (ppStaleD) staleD = " · 路径日志读取异常";
       }
       summary.push(`<span class="chip" title="有线 CP 状态：sc8581 operation mode + quickchg work_mode/ratio + cur_work_cp${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(wPath)}</b><small>${staleD}</small></span>`);
-    }
-    const battMa = d.derived && d.derived.batt_current_ma;
-    const dec = buck && buck.cur_max_decision;
-    // 电池侧算法上限：quick wireless 最近一次 cur_max:[Final]（带年龄，超 30s 标历史值）
-    if (dec && dec.final !== null && dec.final !== undefined) {
-      const decAge = dec.at ? Math.max(0, Math.round((Date.now() - dec.at) / 1000)) : null;
-      const stale = decAge !== null && decAge > 30;
-      summary.push(`<span class="chip"${stale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} ` +
-        `title="quick wireless select_max_ibat 的最终电池电流目标（非 MCA votable）${dec.log_time ? " · 日志 " + esc(dec.log_time) : ""}">` +
-        `电池侧算法上限<b>${dec.final}</b><small>quick_wireless cur_max${decAge !== null ? " · " + decAge + "s前" : ""}${stale ? " · 历史值/待刷新" : ""}</small></span>`);
-      const swEff = effectiveOf(topics.wireless_sw_thermal_ich);
-      if (swEff && swEff.value !== dec.final) {
-        summary.push(`<span class="chip" title="热控投票已更新，quick wireless 尚未重新输出 cur_max Final，等待收敛">` +
-          `最新限制候选<b>${swEff.value}</b><small>${esc(swEff.client)}${logsAge !== null ? " · " + logsAge + "s前" : ""} · 等待收敛</small></span>`);
+      if (wcp.state === "cp") {
+        // 有线 CP：Quick Charge 算法目标（1611 型 cur_max 优先，1597 型阶段值兜底），绝不用 buck_charge_curr 顶替
+        if (!ceStopped) {
+          const wd = wcp.cur_max && wcp.cur_max.cur_max !== undefined && wcp.cur_max.cur_max !== null
+            ? wcp.cur_max : null;
+          const wst = wcp.stage_cur_max && wcp.stage_cur_max.cur_max !== undefined
+            && wcp.stage_cur_max.cur_max !== null ? wcp.stage_cur_max : null;
+          const curAge = o => (o && o.at) ? Math.max(0, Math.round((Date.now() - o.at) / 1000)) : null;
+          // 按分压比选路径限制表；single/multi 拓扑未确认前不自动二选一
+          const ratio = wcp.ratio;
+          const divSingle = ratio === 4 ? "div4_single"
+            : ratio === 2 ? "div2_single"
+            : ratio === 1 ? "div1_single" : null;
+          const divMulti = ratio === 4 ? "div4_multi"
+            : ratio === 2 ? "div2_multi"
+            : ratio === 1 ? "div1_multi" : null;
+          const limSingle = divSingle ? effectiveOf(topics[divSingle]) : null;
+          const limMulti = divMulti ? effectiveOf(topics[divMulti]) : null;
+          // 算法目标（原始 cur_max，不预先取 min；限制关系由下面两层表达）
+          if (wd) {
+            const age = curAge(wd);
+            summary.push(`<span class="chip" title="mca_quick_charge_select_max_ibat 最终行 cur_max（算法目标，非实测电流，可能被路径限制压住）${wd.log_time ? " · 日志 " + esc(wd.log_time) : ""}">` +
+              `Quick Charge 算法目标<b>${fmt(wd.cur_max, 0)}</b><small>quick_charge cur_max${age !== null ? " · " + age + "s前" : ""}</small></span>`);
+          } else if (wst) {
+            const age = curAge(wst);
+            summary.push(`<span class="chip" title="仅捕获到 mca_quick_charge_select_max_ibat 阶段行，等待最终调节值${wst.log_time ? " · 日志 " + esc(wst.log_time) : ""}">` +
+              `阶段算法目标<b>${fmt(wst.cur_max, 0)}</b><small>cur_stage${age !== null ? " · " + age + "s前" : ""} · 等待最终调节值</small></span>`);
+          } else {
+            summary.push(`<span class="chip" title="有线 CP 已确认，但尚未捕获 quick_charge cur_max">Quick Charge 算法目标<b>--</b><small>待刷新</small></span>`);
+          }
+          // CP 路径限制：single/multi 同值视为共同上限，异值并列展示并标拓扑待确认
+          const pushLim = (lim, topic, extra) => {
+            if (!lim) return;
+            summary.push(`<span class="chip" title="${topic} 投票上限（CP 路径约束，非最终充电目标）">` +
+              `CP ${ratio || ""}:1 路径限制<b>${fmt(lim.value, 0)}</b><small>${esc(lim.client)} · ${topic}${extra || ""}</small></span>`);
+          };
+          if (limSingle && limMulti) {
+            if (limSingle.value === limMulti.value) {
+              pushLim(limSingle, divSingle + "/" + divMulti);
+            } else {
+              pushLim(limSingle, divSingle, " · 拓扑待确认");
+              pushLim(limMulti, divMulti, " · 拓扑待确认");
+            }
+          } else {
+            pushLim(limSingle || limMulti, (limSingle ? divSingle : divMulti));
+          }
+          // 综合有效上限：仅当路径限制可确定（单一表，或双表同值）时才推算 min
+          const rawTarget = wd ? wd.cur_max : (wst ? wst.cur_max : null);
+          const knownLim = limSingle && limMulti
+            ? (limSingle.value === limMulti.value ? limSingle : null)
+            : (limSingle || limMulti);
+          if (rawTarget !== null && knownLim) {
+            const eff = Math.min(rawTarget, knownLim.value);
+            const capped = knownLim.value < rawTarget;
+            summary.push(`<span class="chip" title="min(quick_charge cur_max ${rawTarget}mA, ${knownLim.value}mA) = ${eff}mA（推算，非驱动直接输出）">` +
+              `综合有效上限<b>${fmt(eff, 0)}</b><small>推算${capped ? " · 受路径限制约束" : " · cur_max 主导"}</small></span>`);
+          } else if (rawTarget !== null && limSingle && limMulti && limSingle.value !== limMulti.value) {
+            summary.push(`<span class="chip" title="single/multi 两张表值不同，无法确定当前生效路径限制，不做推算">综合有效上限<b>--</b><small>single/multi 拓扑待确认</small></span>`);
+          } else if (rawTarget !== null && !divSingle) {
+            summary.push(`<span class="chip" title="分压比未知，无法选择对应 div 限制表，不做推算">综合有效上限<b>--</b><small>分压比待确认</small></span>`);
+          }
+        }
+        if (battMa !== null && battMa !== undefined) {
+          summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b>${fmt(Math.abs(battMa), 0)}</b><small>battery</small></span>`);
+        }
+      } else {
+        // 有线 Buck / 待确认：USB 输入侧 ICL + 电池侧 FCC
+        addSummary("有线输入限流", effectiveOf(topics.buck_input), v => `${v}mA`);
+        addSummary("电池充电上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
       }
-    } else if (buck && buck.actual_limit !== null && buck.actual_limit !== undefined) {
-      const src = buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc";
-      summary.push(`<span class="chip" title="电池侧充电电流上限（quick_wireless cur_max / buck_fcc）">电池侧算法上限<b>${buck.actual_limit}</b><small>${esc(src)}</small></span>`);
-    } else {
-      addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+    } else if (wirelessActive) {
+      // 无线路径：quick wireless cur_max → 电池侧算法上限；缺失时回退 wireless loop buck_fcc；最后才是 buck_charge_curr
+      const dec = buck && buck.cur_max_decision;
+      if (dec && dec.final !== null && dec.final !== undefined) {
+        const decAge = dec.at ? Math.max(0, Math.round((Date.now() - dec.at) / 1000)) : null;
+        const stale = decAge !== null && decAge > 30;
+        summary.push(`<span class="chip"${stale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} ` +
+          `title="quick wireless select_max_ibat 的最终电池电流目标（非 MCA votable）${dec.log_time ? " · 日志 " + esc(dec.log_time) : ""}">` +
+          `电池侧算法上限<b>${dec.final}</b><small>quick_wireless cur_max${decAge !== null ? " · " + decAge + "s前" : ""}${stale ? " · 历史值/待刷新" : ""}</small></span>`);
+        const swEff = effectiveOf(topics.wireless_sw_thermal_ich);
+        if (swEff && swEff.value !== dec.final) {
+          summary.push(`<span class="chip" title="热控投票已更新，quick wireless 尚未重新输出 cur_max Final，等待收敛">` +
+            `最新限制候选<b>${swEff.value}</b><small>${esc(swEff.client)}${logsAge !== null ? " · " + logsAge + "s前" : ""} · 等待收敛</small></span>`);
+        }
+      } else if (buck && buck.actual_limit !== null && buck.actual_limit !== undefined) {
+        const src = buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc";
+        summary.push(`<span class="chip" title="电池侧充电电流上限（quick_wireless cur_max / buck_fcc）">电池侧算法上限<b>${buck.actual_limit}</b><small>${esc(src)}</small></span>`);
+      } else {
+        addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+      }
     }
-    const ceEff = effectiveOf(topics.chg_enable);
-    const ceShown = ceEff && ceEff.value === 0
-      && battMa !== null && battMa !== undefined && battMa > 300
-      ? { client: "实测（驱动 OFF）", value: 1, calc: false }
-      : ceEff;
-    addSummary("充电使能", ceShown, v => (v === 1 ? "ON" : "OFF"));
+    addSummary("充电使能", ceEff, v => (v === 1 ? "ON" : "OFF"));
+    if (ceStopping) {
+      summary.push(`<span class="chip" title="chg_enable 已 OFF，但实测电池电流仍 >300mA，等待驱动收敛">充电状态<b>停止中</b><small>状态收敛中</small></span>`);
+    } else if (ceStopped) {
+      summary.push(`<span class="chip" title="chg_enable 已 OFF 且实测电池电流已接近 0">充电状态<b>已停止</b><small>驱动 OFF</small></span>`);
+    }
     if (!wirelessActive) {
       addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
     } else {
@@ -906,7 +996,7 @@ function renderVoters(d) {
     summary.push(`<span class="chip">电池温度<b>${fmt(d.derived.temp_c, 1)}</b><small>°C</small></span>`);
   }
   const summaryCard = summary.length
-    ? `<div class="card"><h2>总仲裁结果<span class="tag">汇总</span></h2>` +
+    ? `<div class="card wide"><h2>总仲裁结果<span class="tag">汇总</span></h2>` +
       `<div class="chips" style="justify-content:flex-start">${summary.join("")}</div></div>`
     : "";
 
@@ -985,9 +1075,9 @@ function renderVoters(d) {
       `<span class="vote-result">终止电流 <b>${jc === null || jc === undefined ? "-" : jc}</b><small>mA</small></span></div>` +
       `<div class="vote-chips"></div></div>`;
   }
-  // CP 路径生效时，wireless_buck_input 折叠进仲裁详情（不彻底删除）
+  // CP 路径生效时，wireless_buck_input 折叠进仲裁详情（不彻底删除）；仅无线路径展示
   let buckDetail = "";
-  if (chargingNow && buckCp) {
+  if (chargingNow && wirelessActive && buckCp) {
     const bt = topics.wireless_buck_input;
     const resTxt = resultValid(bt)
       ? `<span class="vote-result">名义仲裁 ${esc(bt.result.client)} → ${bt.result.value}${bt.unit || ""}</span>` : "";
@@ -996,10 +1086,10 @@ function renderVoters(d) {
       `<div class="vote-head">${resTxt}</div>` +
       `<div class="vote-chips">${chipHtml(bt)}</div></details>`;
   }
-  // Quick Wireless 电池电流决策：算法聚合（非 MCA votable），展示输入项与最终 cur_max
+  // Quick Wireless 电池电流决策：算法聚合（非 MCA votable），仅无线路径展示
   let quickCard = "";
   const dec = buck && buck.cur_max_decision;
-  if (chargingNow && dec) {
+  if (chargingNow && wirelessActive && dec) {
     const inputs = [
       ["channel_cur", dec.channel_cur],
       ["temp_max_cur", dec.temp_max_cur],
@@ -1037,9 +1127,10 @@ function renderCharts(d) {
   const srcEl = $("chart-input-source");
   if (srcEl) {
     const src = d.derived && d.derived.input_source;
+    const det = d.derived && d.derived.input_detail_source;
     const wiredWaiting = d.derived && d.derived.wired_input_waiting;
     srcEl.textContent = src === "wired"
-      ? "有线 · " + srcText(d.derived && d.derived.wired_input_source)
+      ? "有线 · " + srcText(det)
         + (wiredWaiting ? " · 等待策略遥测" : "")
       : src === "wireless" ? "无线 · wls_debug" : "";
   }
@@ -1047,7 +1138,7 @@ function renderCharts(d) {
     const latest = d.derived ? d.derived[s.id] : null;
     $(s.label).textContent = latest === null || latest === undefined ? "--" : fmt(s.scale ? s.scale(latest) : latest, s.scale ? 2 : 0);
     const vals = h.map(x => x[s.id] === null || x[s.id] === undefined ? null : (s.scale ? s.scale(x[s.id]) : x[s.id]));
-    const srcs = h.map(x => x.input_source || "none");
+    const srcs = h.map(x => x.input_detail_source || x.input_source || "none");
     drawLine($(s.cv), vals, s.color, s.label.replace("chart-", ""), srcs);
   });
 }

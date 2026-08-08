@@ -357,7 +357,9 @@ class AdbReader:
                    "strategy_buckchg_update_charge_status|"
                    "mca_quick_charge_regulation|"
                    "mca_wireless_quick_charge_select_cur_work_mode|"
-                   "mca_wireless_quick_charge_select_max_ibat")
+                   "mca_wireless_quick_charge_select_max_ibat|"
+                   "mca_quick_charge_select_max_ibat:.*cur_stage .*cur_max .*cur_work_cp|"
+                   "mca_quick_charge_select_max_ibat:.*cur_max .*secure_cur .*channel_cur .*thermal_cur")
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n 1"'], timeout=10)
@@ -457,6 +459,7 @@ VOTE_UNITS = {
     "wls_quick_chg_disable": "",  # 无线快充禁用开关（0/1，无单位）
     "wireless_buck_input": "mA",
     "buck_charge_curr": "mA",
+    "buck_input": "mA",
     "wireless_bpp_in": "mA",
     "wireless_bppqc2_in": "mA",
     "wireless_bppqc3_in": "mA",
@@ -676,6 +679,14 @@ def parse_quick_cur_decision(text: str, offset_minutes: int = 0) -> dict | None:
     return result
 
 
+WIRED_STAGE_CUR_MAX_RE = re.compile(
+    r"mca_quick_charge_select_max_ibat:.*cur_stage (\d+) cur_max (\d+) "
+    r"delta_cur (\d+) cur_work_cp")
+WIRED_FINAL_CUR_MAX_RE = re.compile(
+    r"mca_quick_charge_select_max_ibat:.*cur_max (\d+) secure_cur (\d+) "
+    r"channel_cur (\d+) thermal_cur (\d+)")
+
+
 def parse_session_cp_state(text: str, offset_minutes: int = 0):
     """无线/有线 CP 状态彻底解耦：
     - power_good 只重置无线 track；usb online / real_type changed 只重置有线 track
@@ -697,6 +708,8 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
     d_buck = False
     d_boundary = False
     d_ctx = False
+    d_cur_max: dict | None = None
+    d_stage_cur_max: dict | None = None
     seq = 0
     for line in text.splitlines():
         seq += 1
@@ -718,6 +731,8 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
             d_cur_cp_seq = -1
             d_buck = False
             d_ctx = False
+            d_cur_max = None
+            d_stage_cur_max = None
             continue
         # 上下文：无线 quickchg 与有线 quickchg 互斥
         if "mca_wireless_quick_charge_" in line:
@@ -749,6 +764,31 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
         m = re.search(r"map_ibus_to_fsw:.*ratio: (\d+)", line)
         if m:
             d_cp_ratio = int(m.group(1))
+            continue
+        mf = WIRED_FINAL_CUR_MAX_RE.search(line)
+        if mf and d_ctx:
+            tm = VOTE_TIME_RE.search(line)
+            d_cur_max = {
+                "cur_max": int(mf.group(1)),
+                "secure_cur": int(mf.group(2)),
+                "channel_cur": int(mf.group(3)),
+                "thermal_cur": int(mf.group(4)),
+                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "at": int(time.time() * 1000),
+            }
+            continue
+        ms = WIRED_STAGE_CUR_MAX_RE.search(line)
+        if ms and d_ctx:
+            tm = VOTE_TIME_RE.search(line)
+            d_stage_cur_max = {
+                "stage": int(ms.group(1)),
+                "cur_max": int(ms.group(2)),
+                "delta": int(ms.group(3)),
+                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "at": int(time.time() * 1000),
+            }
+            d_cur_cp = True
+            d_cur_cp_seq = seq
             continue
         if "mca_quick_charge_select_max_ibat:" in line and "cur_work_cp" in line:
             d_cur_cp = True
@@ -792,7 +832,8 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
         d_state = "unknown"
     return {
         "wireless": (w_cp_mode, w_cp_work_mode, w_decision, w_boundary),
-        "wired": (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary),
+        "wired": (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
+                  d_cur_max, d_stage_cur_max),
     }
 
 
@@ -1106,6 +1147,9 @@ class Sampler:
         self.last_wired_cp_ratio: int | None = None
         self.last_wired_cur_cp: bool = False
         self.last_wired_buck: bool = False
+        # 有线 CP quick_charge cur_max：1611 最终行 / 1597 阶段行
+        self.last_wired_cur_max: dict | None = None
+        self.last_wired_stage_cur_max: dict | None = None
         # 有线输入遥测缓存：CP 与 Buck 各留一份，按 wired_cp.state 选择来源
         self.last_wired_cp_tel: dict | None = None
         self.last_wired_buck_tel: dict | None = None
@@ -1163,6 +1207,7 @@ class Sampler:
             sample = {
                 "t": parsed["ts"],
                 "input_source": parsed["derived"].get("input_source"),
+                "input_detail_source": parsed["derived"].get("input_detail_source"),
                 "input_voltage_mv": parsed["derived"].get("input_voltage_mv"),
                 "input_current_ma": parsed["derived"].get("input_current_ma"),
                 "input_power_w": parsed["derived"].get("input_power_w"),
@@ -1242,7 +1287,8 @@ class Sampler:
                 self.last_quick_cur_max = quick_cur_max
             state = parse_session_cp_state(pp_log, self.adb.utc_offset_minutes)
             w_cp_mode, w_cp_work_mode, w_decision, w_boundary = state["wireless"]
-            d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary = state["wired"]
+            (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
+             d_cur_max, d_stage_cur_max) = state["wired"]
             # 有线输入遥测：只解析最后一次会话边界之后的日志段；
             # 同一行（log_time/vbus/ibus）不刷新 at，避免旧值被伪装成刚刚采到；
             # 新会话/协议变化后尚无遥测时清空缓存并标记等待，页面回退 USB uevent
@@ -1295,6 +1341,8 @@ class Sampler:
                 self.last_wired_cp_ratio = d_cp_ratio
                 self.last_wired_cur_cp = d_cur_cp
                 self.last_wired_buck = d_buck
+                self.last_wired_cur_max = d_cur_max
+                self.last_wired_stage_cur_max = d_stage_cur_max
             else:
                 if d_state != "unknown":
                     self.last_wired_state = d_state
@@ -1304,6 +1352,10 @@ class Sampler:
                     self.last_wired_cur_cp = True
                 if d_buck:
                     self.last_wired_buck = True
+                if d_cur_max is not None:
+                    self.last_wired_cur_max = d_cur_max
+                if d_stage_cur_max is not None:
+                    self.last_wired_stage_cur_max = d_stage_cur_max
 
         self.logs_updated_at = time.time() * 1000
         # 复制、合并日志缓存、发布在同一个锁内完成，避免旧快照覆盖新快照
@@ -1364,6 +1416,10 @@ class Sampler:
             "ratio": self.last_wired_cp_ratio if wstate == "cp" else None,
             "active": wstate == "cp",
             "cur_work_cp": bool(self.last_wired_cur_cp),
+            "cur_max": (copy.deepcopy(self.last_wired_cur_max)
+                        if self.last_wired_cur_max is not None else None),
+            "stage_cur_max": (copy.deepcopy(self.last_wired_stage_cur_max)
+                              if self.last_wired_stage_cur_max is not None else None),
         }
         meta = core.setdefault("meta", {})
         meta.update({
@@ -1504,40 +1560,58 @@ class Sampler:
         if chosen is not None:
             age = now_ms - chosen["at"]
             wired_stale = age > WIRED_TELEMETRY_STALE_MS.get(chosen["source"], 30000)
-        # 遥测已陈旧且 USB uevent 在线时，用每 3s 快采的 uevent 覆盖（仍保留 source）
+        # 策略日志遥测（校验数据）：regulation/buckchg 的 vbus/ibus，不再承担实时曲线
+        tel_vbus_mv = None
+        tel_ibus_ma = None
+        tel_source = None
+        tel_log_time = ""
+        tel_at = None
         if chosen is not None and not usb_known_off and not (wired_stale and usb_online):
-            wired_vbus_mv = chosen["vbus_mv"]
-            wired_ibus_ma = chosen["ibus_ma"]
-            wired_source = chosen["source"]
-            wired_log_time = chosen["log_time"]
-            wired_at = chosen["at"]
-        elif usb_online:
-            wired_vbus_mv = usb_vbus_mv
-            wired_ibus_ma = usb_ibus_ma
-            wired_source = "usb_uevent"
-            wired_log_time = ""
-            wired_at = now_ms
-            wired_stale = False
-        else:
-            wired_vbus_mv = None
-            wired_ibus_ma = None
-            wired_source = None
-            wired_log_time = ""
-            wired_at = None
-            wired_stale = False
+            tel_vbus_mv = chosen["vbus_mv"]
+            tel_ibus_ma = chosen["ibus_ma"]
+            tel_source = chosen["source"]
+            tel_log_time = chosen["log_time"]
+            tel_at = chosen["at"]
+        # 实时测量主源（每 3s）：
+        #  有线 CP         → ibus_total（电荷泵总线电流，sysfs）
+        #  有线 Buck/unknown → usb uevent CURRENT_NOW
+        #  两者都不可用     → 回退策略日志遥测
+        rt_vbus_mv = None
+        rt_ibus_ma = None
+        rt_source = None
+        rt_at = None
+        if wstate == "cp":
+            ibus_total = num(nodes.get("ibus_total", {}).get("value", ""))
+            if ibus_total is not None:
+                vb = tel_vbus_mv if tel_vbus_mv is not None else usb_vbus_mv
+                if vb is not None:
+                    rt_vbus_mv = vb
+                    rt_ibus_ma = ibus_total
+                    rt_source = "cp_ibus_total"
+                    rt_at = now_ms
+        if rt_source is None and usb_online:
+            if usb_vbus_mv is not None and usb_ibus_ma is not None:
+                rt_vbus_mv = usb_vbus_mv
+                rt_ibus_ma = usb_ibus_ma
+                rt_source = "usb_uevent"
+                rt_at = now_ms
+        if rt_source is None and tel_vbus_mv is not None and tel_ibus_ma is not None:
+            rt_vbus_mv = tel_vbus_mv
+            rt_ibus_ma = tel_ibus_ma
+            rt_source = tel_source
+            rt_at = tel_at
+        wired_online = rt_vbus_mv is not None and rt_ibus_ma is not None
         # mV × mA = µW，直接换算成 W（除以 1e6），前端只显示 W
         wired_power = (
-            wired_vbus_mv * wired_ibus_ma / 1e6
-            if wired_vbus_mv is not None and wired_ibus_ma is not None
-            else None
+            rt_vbus_mv * rt_ibus_ma / 1e6
+            if wired_online else None
         )
-        wired_online = wired_vbus_mv is not None and wired_ibus_ma is not None
 
         # 当前输入源抽象层：有线优先（避免旧无线残留值覆盖），无输入时为 none
         if wired_online:
             input_source = "wired"
-            input_vol_mv = wired_vbus_mv
-            input_cur_ma = wired_ibus_ma
+            input_vol_mv = rt_vbus_mv
+            input_cur_ma = rt_ibus_ma
             input_power = wired_power
         elif vout is not None and iout is not None and (vout != 0 or iout != 0):
             input_source = "wireless"
@@ -1559,24 +1633,39 @@ class Sampler:
         derived = {
             "vout": vout, "vrect": wls.get("vrect"), "iout": iout,
             "input_source": input_source,
+            "input_detail_source": (
+                rt_source if input_source == "wired"
+                else "wls_debug" if input_source == "wireless" else None
+            ),
             "input_power_w": round(input_power, 2) if input_power is not None else None,
             "input_voltage_mv": input_vol_mv,
             "input_current_ma": input_cur_ma,
             "wired_online": wired_online,
-            "wired_vbus_mv": round(wired_vbus_mv, 1) if wired_vbus_mv is not None else None,
-            "wired_ibus_ma": round(wired_ibus_ma, 1) if wired_ibus_ma is not None else None,
+            "wired_vbus_mv": round(rt_vbus_mv, 1) if rt_vbus_mv is not None else None,
+            "wired_ibus_ma": round(rt_ibus_ma, 1) if rt_ibus_ma is not None else None,
             "wired_input_power_w": round(wired_power, 2) if wired_power is not None else None,
-            "wired_input_source": wired_source,
-            "wired_input_at": wired_at,
-            "wired_input_log_time": wired_log_time,
+            "wired_input_source": rt_source,
+            "wired_input_at": rt_at,
+            "wired_input_log_time": tel_log_time,
             "wired_input_age": (
-                round((now_ms - wired_at) / 1000.0)
-                if wired_at is not None else None
+                round((now_ms - rt_at) / 1000.0)
+                if rt_at is not None else None
             ),
             "wired_input_waiting": (
                 self.last_wired_tel_waiting and chosen is None and usb_online
             ),
             "wired_input_stale": wired_stale,
+            # 校验遥测（策略日志）：与实时曲线源分层展示
+            "wired_tel_source": tel_source,
+            "wired_tel_vbus_mv": (
+                round(tel_vbus_mv, 1) if tel_vbus_mv is not None else None
+            ),
+            "wired_tel_ibus_ma": (
+                round(tel_ibus_ma, 1) if tel_ibus_ma is not None else None
+            ),
+            "wired_tel_stale": wired_stale,
+            "wired_tel_log_time": tel_log_time,
+            "wired_tel_at": tel_at,
             "wired_usb_online": usb_online,
             "battery_power_w": round(battery_power, 2) if battery_power is not None else None,
             "batt_current_ma": round(batt_cur_ma, 1) if batt_cur_ma is not None else None,
