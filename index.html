@@ -665,7 +665,15 @@ function renderVoters(d) {
   const buck = topics.wireless_buck_input;
   const mcaEff = effectiveOf(buck);
   if (wirelessActive) {
-    const pathLabel = buck && buck.cp_active ? "电荷泵（Quick Wireless）" : "Buck 直充（无线）";
+    const ratio = buck && buck.cp_ratio
+      ? (buck.cp_ratio === 1 ? "1:1（bypass）"
+          : buck.cp_ratio === 2 ? "2:1（div2）"
+          : buck.cp_ratio === 4 ? "4:1（div4）"
+          : buck.cp_ratio + ":1")
+      : "";
+    const pathLabel = buck && buck.cp_active
+      ? `电荷泵（Quick Wireless）${ratio ? " · " + ratio : ""}`
+      : "Buck 直充（无线）";
     summary.push(`<span class="chip" title="由 sc8581 电荷泵 work_mode 判定">当前功率路径<b>${esc(pathLabel)}</b></span>`);
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined

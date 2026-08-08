@@ -14,6 +14,7 @@
 - 有线/无线快充禁用卡按当前连接动态显示
 - 仲裁结果带**有效性校验**：主题全部撤票（如拔掉充电）后，旧 `effective vote is now` 不再展示，卡片按“生效主题”隐藏
 - 功率路径判定只以 sc8581 电荷泵 work_mode 为准（不用电流大小猜测）：首页显示“当前功率路径”（电荷泵 / Buck 直充）
+- “当前功率路径”chip 附带电荷泵转换比（由 quick wireless work_mode 映射：1:1 bypass / 2:1 div2 / 4:1 div4）
 - 电荷泵路径生效时，首页隐藏 `wireless_buck_input`，折叠到“仲裁详情 · 未生效”卡（保留名义仲裁与投票，标注退出 CP 后将使用该限流）
 - **仲裁展示分离**：`effective vote is now`（MCA 逻辑仲裁）、`wireless loop icl`（驱动实际下发限流）、`wls_debug iout`（实时输出电流）三组独立展示，ICL 与 iout 偏差超过 200mA 时提示“可能为旧日志或不同控制阶段”
 - **会话档案**：以 `power_good_on` 建立会话，`power_good_off` 记入“充电板移除”事件；保留全部电流变化与 open path 事件；最多 3 个会话、每个会话最多 100 条事件
