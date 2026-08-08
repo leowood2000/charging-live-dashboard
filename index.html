@@ -321,12 +321,13 @@
     </div>
   </section>
 
-  <div class="section-title">电流投票实时表 <span class="badge">生效主题 · 20 秒刷新</span>
+  <div class="section-title">电流投票实时表 <span class="badge">生效主题 · 10 秒刷新</span>
+    <span id="voteLogsAge" class="badge" style="display:none"></span>
     <span id="logsStaleBadge" class="badge" style="display:none;color:var(--amber);border-color:rgba(251,191,36,.5)">日志读取失败 · 显示上次成功数据</span>
   </div>
   <section class="grid" id="voteTopics" aria-label="电流投票实时表"></section>
 
-  <div class="section-title">实时会话档案 <span class="badge">mca_log 最近会话 · 20 秒刷新</span></div>
+  <div class="section-title">实时会话档案 <span class="badge">mca_log 最近会话 · 10 秒刷新</span></div>
   <section class="grid" id="liveSessions" aria-label="实时会话档案"></section>
 
   <details id="rawDetails">
@@ -602,6 +603,18 @@ function renderVoters(d) {
   // 是否真正在充电：以 battery STATUS 为准（缺失时保守显示）
   const battSt = (d.battery && d.battery.status && d.battery.status.value || "").toLowerCase();
   const chargingNow = battSt === "" ? true : battSt === "charging";
+  // 日志数据年龄：投票/仲裁来自 10 秒日志周期，可能与 3 秒实时 KPI 短暂不一致
+  const logsAge = d.meta && d.meta.logs_updated_at
+    ? Math.max(0, Math.round((Date.now() - d.meta.logs_updated_at) / 1000)) : null;
+  const ageEl = $("voteLogsAge");
+  if (ageEl) {
+    if (logsAge !== null && logsAge > 5) {
+      ageEl.style.display = "";
+      ageEl.textContent = `投票数据 ${logsAge}s 前`;
+    } else {
+      ageEl.style.display = "none";
+    }
+  }
   // 只显示与当前连接/状态相关的投票主题：有启用票，或驱动已给出实际投票结果
   const relevant = keys.filter(t => {
     if (isDeviceModelTable(t) || isProtocolTable(t) || isStaticParam(t)) return false;
@@ -710,8 +723,21 @@ function renderVoters(d) {
       `${wlsLabel}<b>${wlsEff.value}</b><small>${esc(wlsEff.client)}${wlsEff.calc ? " · 推算" : ""}</small></span>`);
   }
   if (chargingNow) {
-    addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
-    addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
+    const battMa = d.derived && d.derived.batt_current_ma;
+    const bcEff = effectiveOf(topics.buck_charge_curr);
+    const bcBad = bcEff && bcEff.value !== null && bcEff.value !== undefined
+      && battMa !== null && battMa !== undefined && battMa > bcEff.value * 1.25 + 50;
+    const bcShown = bcBad && buck && buck.actual_limit !== null && buck.actual_limit !== undefined
+      ? { client: buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc",
+          value: buck.actual_limit, calc: false }
+      : bcEff;
+    addSummary("充电电流", bcShown, v => `${v}mA`);
+    const ceEff = effectiveOf(topics.chg_enable);
+    const ceShown = ceEff && ceEff.value === 0
+      && battMa !== null && battMa !== undefined && battMa > 300
+      ? { client: "实测（驱动 OFF）", value: 1, calc: false }
+      : ceEff;
+    addSummary("充电使能", ceShown, v => (v === 1 ? "ON" : "OFF"));
     if (!wirelessActive) {
       addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
     } else {
@@ -1023,7 +1049,7 @@ setInterval(() => {
   const remain = Math.max(0, (lastFetchAt + pollMs - Date.now()) / 1000);
   const fc = $("fastCountdown");
   if (fc) fc.textContent = remain.toFixed(1) + "s";
-  const logsInterval = (lastMeta.logs_interval || 20) * 1000;
+  const logsInterval = (lastMeta.logs_interval || 10) * 1000;
   const logsRemain = Math.max(0,
     (lastMeta.logs_updated_at || Date.now()) + logsInterval - Date.now());
   const lc = $("logsCountdown");

@@ -5,7 +5,7 @@ Redmi K80 Pro (miro) MCA charging real-time dashboard backend (ADB 版).
 
 数据语义与安卓版 SnapshotCollector.java 对齐：
 - 快速采集（sysfs + battery + thermal + history）默认 3 秒
-- 日志采集（voters / sessions / EPP / 实际下发 ICL）默认 20 秒
+- 日志采集（voters / sessions / EPP / 实际下发 ICL）默认 10 秒
 - 电池电流约定：充电为正、放电为负；电池功率保留正负号
 - 日志读取失败保留上次成功数据，并由 logs_stale 标记
 - 会话/投票/仲裁输出与安卓版同构
@@ -1153,8 +1153,8 @@ def main():
                         help="adb executable or folder (default: auto-detect C:\\adb or PATH)")
     parser.add_argument("--interval", type=float, default=3.0,
                         help="fast sample/refresh interval in seconds (default 3)")
-    parser.add_argument("--logs-interval", type=float, default=20.0,
-                        help="vote/session log interval in seconds (default 20)")
+    parser.add_argument("--logs-interval", type=float, default=10.0,
+                        help="vote/session log interval in seconds (default 10)")
     parser.add_argument("--port", type=int, default=8765, help="HTTP port (default 8765)")
     parser.add_argument("--open", action="store_true", help="open the page in the default browser")
     args = parser.parse_args()

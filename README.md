@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **双周期采集**：快速采集 3 秒（sysfs 节点、battery uevent、thermal.dump、历史曲线），日志采集 20 秒（投票表、会话、EPP、实际下发 ICL），避免每 3 秒重扫几 MB 日志
+- **双周期采集**：快速采集 3 秒（sysfs 节点、battery uevent、thermal.dump、历史曲线），日志采集 10 秒（投票表、会话、EPP、实际下发 ICL），避免每 3 秒重扫几 MB 日志
 - **电流符号统一**：充电为正、放电为负，`Not charging` 也按放电处理；电池功率保留正负号；原始 JSON 仍保留内核原值方便排查
 - **MCA 仲裁移植**：支持 `voting on/off`、完整 client 字符集、单位白名单（未知主题不默认 mA）、已反汇编核实的 `VOTE_POLICIES`（MIN / FIRST_NONZERO / FIRST_ZERO / UNKNOWN）、按主题缓存 `changed`/`result`
 - **总仲裁只显示实际结果**：无线输入限流在仲裁值未生效（icl 与 iout 违反物理功率比）时，chip 改为“实际约束限流”并显示电池侧真正约束电流的限流（quick_wireless `cur_max:[Final]` / `buck_fcc`），不再误标为无线输入电流；ICL / iout 细节保留在投票详情卡
@@ -166,4 +166,4 @@ python server.py --adb-host 192.168.33.118:5555 --port 8765 --interval 3 --logs-
 
 ## 数据来源
 
-`K80Pro_小米无线私有充电协议深度分析.md`（2026-08-03 实测）；实时投票表来自设备滚动日志 `/data/vendor/bsplog/charge/charge_logger/mca_log/`（投票变化时打印完整 VOTER 表，SoC 步进期间约每 10 秒一次），页面每 20 秒更新一次并按最新一张表展示。
+`K80Pro_小米无线私有充电协议深度分析.md`（2026-08-03 实测）；实时投票表来自设备滚动日志 `/data/vendor/bsplog/charge/charge_logger/mca_log/`（投票变化时打印完整 VOTER 表，SoC 步进期间约每 10 秒一次），页面每 10 秒更新一次并按最新一张表展示。
