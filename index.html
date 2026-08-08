@@ -825,19 +825,27 @@ function renderVoters(d) {
   // EPP+/QC 阶段 wls_icl 与 iout 属于不同控制域，禁止比较
   const iclBad = wlsMode === "bpp_drawload" && buck && buck.icl !== undefined && buck.icl !== null
     ? iclNotEffective(buck.icl, ioutNow) : false;
-  // 总仲裁无线输入项：永远以 wireless_buck_input 的 MCA effective 为准（fresh 判定按 work_mode 阶段）；
-  // wireless loop ICL 是执行层下发值，只进详情卡做对照，绝不反推为仲裁结果
+  // 总仲裁无线输入项：显示“无线输入控制”——
+  // 当前 work_mode 后的执行 ICL 作为主值，MCA effective 作为仲裁来源/对照；
+  // effective 生命周期只随会话（power_good_off 清空），work_mode 变化不使其失效
   if (chargingNow && wirelessActive && buck) {
     const workMs = buck.wls_work_mode_ms || 0;
-    const effFresh = mcaEff && mcaEff.r_ms !== null && mcaEff.r_ms !== undefined
-      && (!workMs || mcaEff.r_ms >= workMs);
-    if (effFresh) {
-      const pauseTag = buck.chg_en === 0 ? " · 充电暂停" : "";
-      summary.push(`<span class="chip" title="wireless_buck_input MCA 仲裁结果（当前 work_mode 后新产生）；执行层 ICL 见详情卡">` +
-        `无线输入仲裁<b>${fmt(mcaEff.value, 0)}</b><small>${esc(mcaEff.client)}${pauseTag}</small></span>`);
+    const iclCur = buck.icl !== null && buck.icl !== undefined
+      && (!workMs || (buck.icl_ms || 0) >= workMs);
+    const pauseTag = buck.chg_en === 0 ? " · 充电暂停" : "";
+    if (iclCur) {
+      const smallTxt = mcaEff
+        ? (mcaEff.value === buck.icl
+            ? `仲裁 ${esc(mcaEff.client)} → ${mcaEff.value}mA · 一致`
+            : `仲裁 ${esc(mcaEff.client)} → ${mcaEff.value}mA · 下游降至 ${buck.icl}mA`)
+        : "仲裁来源未捕获";
+      summary.push(`<span class="chip" title="执行层实际下发 ICL（当前 work_mode 后）；MCA 仲裁见小字">` +
+        `无线输入控制<b>${fmt(buck.icl, 0)}</b><small>执行 ICL${pauseTag} · ${smallTxt}</small></span>`);
+    } else if (mcaEff) {
+      summary.push(`<span class="chip" title="当前路径尚未捕获新的执行 ICL，显示 MCA 仲裁值（本会话持续状态，不受 work_mode 失效）">` +
+        `无线输入控制<b>${fmt(mcaEff.value, 0)}</b><small>MCA仲裁${pauseTag} · 执行 ICL 待捕获</small></span>`);
     } else {
-      summary.push(`<span class="chip" title="当前 work_mode 后尚未捕获新的 wireless_buck_input effective；执行层 ICL 不反推仲裁结果">` +
-        `无线输入仲裁<b>--</b><small>未捕获当前 effective</small></span>`);
+      summary.push(`<span class="chip" title="无线输入暂无仲裁结果或执行 ICL">无线输入控制<b>--</b><small>尚无控制结果</small></span>`);
     }
   }
   if (chargingNow) {
@@ -993,9 +1001,8 @@ function renderVoters(d) {
       : "";
     let resultText = "";
     if (resultValid(b)) {
-      const effOld = (b.wls_work_mode_ms || 0) > 0 && (b.result.r_ms || 0) < (b.wls_work_mode_ms || 0);
       resultText = `<span class="vote-result" title="驱动 effective vote is now">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}` +
-        `${b.result.time ? `<small> · ${esc(b.result.time)}</small>` : ""}${effOld ? `<small> · 历史（work_mode 前）</small>` : ""}</span>`;
+        `${b.result.time ? `<small> · ${esc(b.result.time)}</small>` : ""}</span>`;
     } else if (t === "wireless_buck_input") {
       resultText = `<span class="vote-result" title="未捕获 mca_vote effective 行，不以执行层 ICL 反推仲裁">仲裁结果 <b>--</b><small>未捕获当前 effective</small></span>`;
     } else if ((b.policy === "MIN" || b.policy === "MAX") && b.unit === "mA" && rows.length) {
