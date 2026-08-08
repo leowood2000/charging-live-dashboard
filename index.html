@@ -601,7 +601,7 @@ function renderVoters(d) {
   const wirelessActive = !!(d.derived && d.derived.vrect > 0);
   // 是否真正在充电：以 battery STATUS 为准（缺失时保守显示）
   const battSt = (d.battery && d.battery.status && d.battery.status.value || "").toLowerCase();
-  const chargingNow = battSt === "" ? true : battSt.includes("charging");
+  const chargingNow = battSt === "" ? true : battSt === "charging";
   // 只显示与当前连接/状态相关的投票主题：有启用票，或驱动已给出实际投票结果
   const relevant = keys.filter(t => {
     if (isDeviceModelTable(t) || isProtocolTable(t) || isStaticParam(t)) return false;
