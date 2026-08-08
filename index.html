@@ -723,10 +723,22 @@ function renderVoters(d) {
   }
   if (chargingNow) {
     const battMa = d.derived && d.derived.batt_current_ma;
-    // 电池侧充电电流上限：quick_wireless cur_max / buck_fcc，与输入侧 ICL 分开展示
-    if (buck && buck.actual_limit !== null && buck.actual_limit !== undefined) {
+    const dec = buck && buck.cur_max_decision;
+    // 电池侧算法上限：quick wireless 最近一次 cur_max:[Final]（带年龄，超 30s 标历史值）
+    if (dec && dec.final !== null && dec.final !== undefined) {
+      const decAge = dec.at ? Math.max(0, Math.round((Date.now() - dec.at) / 1000)) : null;
+      const stale = decAge !== null && decAge > 30;
+      summary.push(`<span class="chip"${stale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} ` +
+        `title="quick wireless select_max_ibat 的最终电池电流目标（非 MCA votable）${dec.log_time ? " · 日志 " + esc(dec.log_time) : ""}">` +
+        `电池侧算法上限<b>${dec.final}</b><small>quick_wireless cur_max${decAge !== null ? " · " + decAge + "s前" : ""}${stale ? " · 历史值/待刷新" : ""}</small></span>`);
+      const swEff = effectiveOf(topics.wireless_sw_thermal_ich);
+      if (swEff && swEff.value !== dec.final) {
+        summary.push(`<span class="chip" title="热控投票已更新，quick wireless 尚未重新输出 cur_max Final，等待收敛">` +
+          `最新限制候选<b>${swEff.value}</b><small>${esc(swEff.client)}${logsAge !== null ? " · " + logsAge + "s前" : ""} · 等待收敛</small></span>`);
+      }
+    } else if (buck && buck.actual_limit !== null && buck.actual_limit !== undefined) {
       const src = buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc";
-      summary.push(`<span class="chip" title="电池侧充电电流上限（quick_wireless cur_max / buck_fcc），与输入侧 ICL 不是同一个节点">电池侧充电上限<b>${buck.actual_limit}</b><small>${esc(src)}</small></span>`);
+      summary.push(`<span class="chip" title="电池侧充电电流上限（quick_wireless cur_max / buck_fcc）">电池侧算法上限<b>${buck.actual_limit}</b><small>${esc(src)}</small></span>`);
     } else {
       addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
     }
@@ -825,12 +837,34 @@ function renderVoters(d) {
       `<div class="vote-head">${resTxt}</div>` +
       `<div class="vote-chips">${chipHtml(bt)}</div></details>`;
   }
+  // Quick Wireless 电池电流决策：算法聚合（非 MCA votable），展示输入项与最终 cur_max
+  let quickCard = "";
+  const dec = buck && buck.cur_max_decision;
+  if (chargingNow && dec) {
+    const inputs = [
+      ["channel_cur", dec.channel_cur],
+      ["temp_max_cur", dec.temp_max_cur],
+      ["tx_adapter_max", dec.tx_adapter_max],
+      ["sw_qc_ichg", dec.sw_qc_ichg],
+      ["sw_thermal_ichg", dec.sw_thermal_ichg],
+    ].filter(r => r[1] !== null && r[1] !== undefined);
+    const minVal = inputs.length ? Math.min(...inputs.map(r => r[1])) : null;
+    const chips = inputs.map(([k, v]) =>
+      `<span class="vote-chip ${v === minVal ? "on" : "off"}" title="${k}${v === minVal ? "（当前瓶颈）" : ""}">` +
+      `<span class="vc-dot"></span><b>${k}</b><i>${v}</i><small>mA</small></span>`).join("");
+    const ibat = d.derived && d.derived.batt_current_ma;
+    quickCard = `<div class="card"><h2>Quick Wireless 电池电流决策<span class="tag">算法聚合 · 非 MCA votable</span></h2>` +
+      `<div class="vote-head"><small>select_max_ibat 输出${dec.log_time ? " · " + esc(dec.log_time) : ""}</small>` +
+      `<span class="vote-result">cur_max:[Final] <b>${dec.final}</b><small>mA</small></span>` +
+      (ibat !== null && ibat !== undefined ? `<span class="vote-result">实际 ibat <b>${fmt(ibat, 0)}</b><small>mA</small></span>` : "") +
+      `</div><div class="vote-chips">${chips}</div></div>`;
+  }
   const cardsShown = chargingNow ? cards : "";
   const notChargingNote = !chargingNow
     ? `<div class="card"><h2>电流投票实时表<span class="tag">未充电</span></h2>` +
       `<p class="note">当前未充电（battery STATUS ≠ Charging），投票/仲裁不生效。</p></div>`
     : "";
-  el.innerHTML = summaryCard + notChargingNote + cardsShown + buckDetail + jeitaCard;
+  el.innerHTML = summaryCard + notChargingNote + cardsShown + quickCard + buckDetail + jeitaCard;
 }
 
 function renderCharts(d) {

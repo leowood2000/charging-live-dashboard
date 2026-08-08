@@ -613,6 +613,34 @@ def parse_cp_work_mode(text: str) -> int | None:
     return last
 
 
+def parse_quick_cur_decision(text: str, offset_minutes: int = 0) -> dict | None:
+    """Latest select_max_ibat decision: inputs (445) + cur_max:[Final] (446)."""
+    last_inputs: dict | None = None
+    result: dict | None = None
+    for line in text.splitlines():
+        m = re.search(
+            r"select_max_ibat:445 \[channel_cur:(\d+)\], \[temp_max_cur:(\d+)\], "
+            r"\[tx_adapter_max:(\d+)\], \[sw_qc_ichg:(\d+)\],\[sw_thermal_ichg:(\d+)\]",
+            line)
+        if m:
+            tm = VOTE_TIME_RE.search(line)
+            last_inputs = {
+                "channel_cur": int(m.group(1)),
+                "temp_max_cur": int(m.group(2)),
+                "tx_adapter_max": int(m.group(3)),
+                "sw_qc_ichg": int(m.group(4)),
+                "sw_thermal_ichg": int(m.group(5)),
+                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "at": int(time.time() * 1000),
+            }
+            continue
+        m2 = re.search(r"select_max_ibat:446 cur_max:\[Final\]: (\d+)", line)
+        if m2 and last_inputs is not None:
+            result = dict(last_inputs)
+            result["final"] = int(m2.group(1))
+    return result
+
+
 def is_last_wireless_power_off(text: str) -> bool:
     """True if the last wireless power event is removal (power_good_off)."""
     return (
@@ -781,6 +809,8 @@ class Sampler:
         self.last_cp_mode: int | None = None
         # quick wireless 电荷泵分压比 work_mode（1/2/4）
         self.last_cp_work_mode: int | None = None
+        # select_max_ibat 完整决策（输入 + cur_max Final + 日志时间）
+        self.last_cur_decision: dict | None = None
 
     def start(self) -> None:
         threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
@@ -872,6 +902,7 @@ class Sampler:
                 self.last_buck_fcc = None
                 self.last_cp_mode = None
                 self.last_cp_work_mode = None
+                self.last_cur_decision = None
             else:
                 icl = parse_wls_icl(session_log, self.adb.utc_offset_minutes)
                 if icl is not None:
@@ -895,6 +926,10 @@ class Sampler:
                 cp_work_mode = parse_cp_work_mode(session_log)
                 if cp_work_mode is not None:
                     self.last_cp_work_mode = cp_work_mode
+                cur_decision = parse_quick_cur_decision(
+                    session_log, self.adb.utc_offset_minutes)
+                if cur_decision is not None:
+                    self.last_cur_decision = cur_decision
 
         self.logs_stale = not vote_read_ok or not session_read_ok
         self.logs_updated_at = time.time() * 1000
@@ -937,6 +972,8 @@ class Sampler:
             buck["cp_active"] = bool(self.last_cp_mode and self.last_cp_mode > 0)
             if self.last_cp_work_mode is not None:
                 buck["cp_ratio"] = self.last_cp_work_mode
+            if self.last_cur_decision is not None:
+                buck["cur_max_decision"] = copy.deepcopy(self.last_cur_decision)
         meta = core.setdefault("meta", {})
         meta.update({
             "interval": self.fast_interval,
