@@ -304,20 +304,21 @@
   <section class="grid" id="groups" aria-label="充电实时数据"></section>
   <section class="charts" id="charts" aria-label="实时曲线">
     <div class="chart-card">
-      <h3>无线输入功率 (W) <span id="chart-input-power">-</span></h3>
-      <canvas id="cv-input-power" role="img" aria-label="无线输入功率曲线"></canvas>
+      <h3>输入功率 (W) <span id="chart-input-power">-</span>
+        <small id="chart-input-source" class="badge"></small></h3>
+      <canvas id="cv-input-power" role="img" aria-label="输入功率曲线"></canvas>
     </div>
     <div class="chart-card">
       <h3>电池电流 (mA) <span id="chart-batt-current">-</span></h3>
       <canvas id="cv-batt-current" role="img" aria-label="电池电流曲线"></canvas>
     </div>
     <div class="chart-card">
-      <h3>无线输入电压 (V) <span id="chart-vout">-</span></h3>
-      <canvas id="cv-vout" role="img" aria-label="无线输入电压曲线"></canvas>
+      <h3>输入电压 (V) <span id="chart-vout">-</span></h3>
+      <canvas id="cv-vout" role="img" aria-label="输入电压曲线"></canvas>
     </div>
     <div class="chart-card">
-      <h3>无线输入电流 (A) <span id="chart-iout">-</span></h3>
-      <canvas id="cv-iout" role="img" aria-label="无线输入电流曲线"></canvas>
+      <h3>输入电流 (A) <span id="chart-iout">-</span></h3>
+      <canvas id="cv-iout" role="img" aria-label="输入电流曲线"></canvas>
     </div>
   </section>
 
@@ -365,7 +366,7 @@ let lastSessionsJson = "";
 let lastGroupsStruct = "";
 
 const KPI = [
-  { id: "input_power_w", label: "无线输入功率", unit: "W", digits: 2, hint: "vout × iout（典型 15–17W）" },
+  { id: "input_power_w", label: "输入功率", unit: "W", digits: 2, hint: "当前输入 VBUS × IBUS（有线/无线自动切换）" },
   { id: "battery_power_w", label: "电池功率", unit: "W", digits: 2, hint: "正值为充电，负值为放电" },
   { id: "batt_current_ma", label: "电池电流", unit: "mA", digits: 0, hint: "充电为正，放电为负" },
   { id: "batt_voltage_mv", label: "电池电压", unit: "mV", digits: 0, hint: "单电芯实测电压" },
@@ -401,6 +402,18 @@ function esc(s) {
 function fmt(v, digits = 0) {
   if (v === null || v === undefined || Number.isNaN(v)) return "--";
   return Number(v).toLocaleString("zh-CN", { maximumFractionDigits: digits, minimumFractionDigits: 0 });
+}
+function srcText(s) {
+  if (s === "quick_charge_regulation") return "quickchg regulation";
+  if (s === "buckchg_telemetry") return "buckchg telemetry";
+  if (s === "usb_uevent") return "USB uevent（兜底）";
+  return s || "-";
+}
+function inputSourceHint(d) {
+  const s = d.input_source;
+  if (s === "wired") return "有线 VBUS × IBUS · " + srcText(d.wired_input_source);
+  if (s === "wireless") return "无线 vout × iout（wls_debug）";
+  return "未连接充电输入";
 }
 function flash(id, value) {
   const el = $(id);
@@ -449,10 +462,11 @@ function renderKpis(d) {
   const html = KPI.map(k => {
     const v = d[k.id];
     const has = v !== null && v !== undefined && !Number.isNaN(v);
+    const hint = k.id === "input_power_w" ? inputSourceHint(d) : k.hint;
     return `<div class="kpi"><div class="label">${k.label}</div>` +
       `<div class="value" id="kpi-${k.id}">${has ? fmt(v, k.digits) : "--"}</div>` +
       `<span class="unit">${has ? k.unit : ""}</span>` +
-      `<div class="hint">${k.hint}</div></div>`;
+      `<div class="hint">${hint}</div></div>`;
   }).join("");
   $("kpis").innerHTML = html;
   KPI.forEach(k => flash("kpi-" + k.id, d[k.id]));
@@ -501,6 +515,8 @@ function renderGroups(d) {
   const struct = JSON.stringify({
     groups: d.nodes.map(n => [n.group, n.id, n.fmt, n.label]),
     batt: BATTERY_FIELDS.map(f => f[0]),
+    src: d.derived && d.derived.input_source,
+    wiredOnline: !!(d.derived && d.derived.wired_online),
   });
   if (struct !== lastGroupsStruct) {
     lastGroupsStruct = struct;
@@ -523,7 +539,25 @@ function renderGroups(d) {
       }
       el.innerHTML = v;
     });
+    ["vbus", "ibus", "power", "src"].forEach(key => {
+      const el = document.querySelector(`[data-wired="${key}"]`);
+      if (el) el.innerHTML = wiredTileValue(key, d);
+    });
   }
+}
+
+function wiredTileValue(key, d) {
+  const tel = (d && d.derived) || {};
+  if (key === "src") {
+    return `<span>${esc(srcText(tel.wired_input_source))}</span>`;
+  }
+  const v = key === "vbus" ? tel.wired_vbus_mv
+    : key === "ibus" ? tel.wired_ibus_ma
+    : tel.wired_input_power_w;
+  if (v === null || v === undefined) return `<span class="empty">--</span>`;
+  if (key === "vbus") return `<span>${fmt(v / 1000, 2)}<small>V</small></span>`;
+  if (key === "ibus") return `<span>${fmt(v, 0)}<small>mA</small></span>`;
+  return `<span>${fmt(v, 2)}<small>W</small></span>`;
 }
 
 function batteryConv(key, raw) {
@@ -554,8 +588,14 @@ function getBatteryShownValue(d, key, item) {
 }
 
 function buildGroups(d) {
+  // 非无线输入时隐藏“无线策略实时”整组（vout/vrect/iout/EPP 等无线语义节点）
+  const src = d.derived && d.derived.input_source;
+  const wiredNow = src === "wired" || !!(d.derived && d.derived.wired_online);
+  const visibleNodes = src === "wireless"
+    ? d.nodes
+    : d.nodes.filter(n => n.group !== "无线策略实时");
   const groups = {};
-  d.nodes.forEach(n => { (groups[n.group] ||= []).push(n); });
+  visibleNodes.forEach(n => { (groups[n.group] ||= []).push(n); });
   const cards = Object.entries(groups).map(([name, nodes]) => {
     const tiles = nodes.map(renderNode).join("");
     const extra = name === "芯片与系统"
@@ -565,6 +605,17 @@ function buildGroups(d) {
     return `<div class="card"><h2>${esc(name)}<span class="tag">${nodes.length} 项</span></h2>` +
       `<div class="tiles">${tiles}${extra}</div></div>`;
   });
+
+  // 有线输入实时卡：VBUS/IBUS/输入功率 + 测量来源，来源按功率路径切换
+  if (wiredNow) {
+    const tel = d.derived || {};
+    const staleTip = tel.wired_input_stale ? "（数据暂时陈旧）" : "";
+    cards.unshift(`<div class="card"><h2>有线输入实时<span class="tag">${esc(srcText(tel.wired_input_source))}${staleTip}</span></h2>` +
+      `<div class="tiles"><div class="tile"><div class="k">有线输入电压<small>VBUS</small></div><div class="v" data-wired="vbus">${wiredTileValue("vbus", d)}</div></div>` +
+      `<div class="tile"><div class="k">有线输入电流<small>IBUS</small></div><div class="v" data-wired="ibus">${wiredTileValue("ibus", d)}</div></div>` +
+      `<div class="tile"><div class="k">有线输入功率<small>VBUS×IBUS</small></div><div class="v" data-wired="power">${wiredTileValue("power", d)}</div></div>` +
+      `<div class="tile wide"><div class="k">测量来源<small>wired_input_source</small></div><div class="v" data-wired="src">${wiredTileValue("src", d)}</div></div></div></div>`);
+  }
 
   const battRows = BATTERY_FIELDS.map(([key, ukey, conv, unit, hint, label, wide]) => {
     const item = d.battery[key] || d.battery[ukey.toLowerCase()];
@@ -606,13 +657,17 @@ function renderVoters(d) {
     "div1_single", "div1_multi", "div2_single", "div2_multi",
     "div4_single", "div4_multi", "single_chg_cur", "multi_chg_cur", "thermal_flip",
   ]);
-  // 当前是否无线充电（vrect 有值），用于有线/无线快充禁用卡的动态显示
-  const wirelessActive = !!(d.derived && d.derived.vrect > 0);
+  // 当前输入源：wired / wireless / none（由后端按功率路径选择，vrect 仅兼容旧接口兜底）
+  const inputSrc = d.derived && d.derived.input_source;
+  const wirelessActive = inputSrc
+    ? inputSrc === "wireless"
+    : !!(d.derived && d.derived.vrect > 0);
   // 是否真正在充电：以 battery STATUS 为准（缺失时保守显示）
   const battSt = (d.battery && d.battery.status && d.battery.status.value || "").toLowerCase();
   const chargingNow = battSt === "" ? true : battSt === "charging";
   const wirelessCharging = chargingNow && wirelessActive;
-  const wiredCharging = chargingNow && !wirelessActive;
+  const wiredCharging = chargingNow && (
+    inputSrc === "wired" || !!(d.derived && d.derived.wired_online));
   // 日志数据年龄：投票/仲裁来自 10 秒日志周期，可能与 3 秒实时 KPI 短暂不一致
   const logsAge = d.meta && d.meta.logs_updated_at
     ? Math.max(0, Math.round((Date.now() - d.meta.logs_updated_at) / 1000)) : null;
@@ -935,14 +990,22 @@ function renderCharts(d) {
   const series = [
     { id: "input_power_w", cv: "cv-input-power", label: "chart-input-power", color: "#22d3ee" },
     { id: "batt_current_ma", cv: "cv-batt-current", label: "chart-batt-current", color: "#34d399" },
-    { id: "vout", cv: "cv-vout", label: "chart-vout", color: "#fbbf24", scale: v => v / 1000 },
-    { id: "iout", cv: "cv-iout", label: "chart-iout", color: "#a78bfa", scale: v => v / 1000 },
+    { id: "input_voltage_mv", cv: "cv-vout", label: "chart-vout", color: "#fbbf24", scale: v => v / 1000 },
+    { id: "input_current_ma", cv: "cv-iout", label: "chart-iout", color: "#a78bfa", scale: v => v / 1000 },
   ];
+  const srcEl = $("chart-input-source");
+  if (srcEl) {
+    const src = d.derived && d.derived.input_source;
+    srcEl.textContent = src === "wired"
+      ? "有线 · " + srcText(d.derived && d.derived.wired_input_source)
+      : src === "wireless" ? "无线 · wls_debug" : "";
+  }
   series.forEach(s => {
     const latest = d.derived ? d.derived[s.id] : null;
     $(s.label).textContent = latest === null || latest === undefined ? "--" : fmt(s.scale ? s.scale(latest) : latest, s.scale ? 2 : 0);
     const vals = h.map(x => x[s.id] === null || x[s.id] === undefined ? null : (s.scale ? s.scale(x[s.id]) : x[s.id]));
-    drawLine($(s.cv), vals, s.color, s.label.replace("chart-", ""));
+    const srcs = h.map(x => x.input_source || "none");
+    drawLine($(s.cv), vals, s.color, s.label.replace("chart-", ""), srcs);
   });
 }
 
@@ -952,7 +1015,7 @@ function clearCanvas(cv) {
   ctx.clearRect(0, 0, cv.width, cv.height);
 }
 
-function drawLine(cv, values, color, name) {
+function drawLine(cv, values, color, name, sources) {
   clearCanvas(cv);
   const valid = values.filter(v => v !== null && v !== undefined && Number.isFinite(v));
   if (valid.length < 2) {
@@ -1009,6 +1072,8 @@ function drawLine(cv, values, color, name) {
   let started = false;
   values.forEach((v, i) => {
     if (v === null || v === undefined) { started = false; return; }
+    // 有线/无线来源切换时断线，不把不同测量节点连成一条连续曲线
+    if (i > 0 && sources && sources[i] !== sources[i - 1]) { started = false; }
     if (!started) { ctx.moveTo(x(i), y(v)); started = true; }
     else ctx.lineTo(x(i), y(v));
   });

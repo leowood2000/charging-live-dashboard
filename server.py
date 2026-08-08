@@ -36,6 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_SYSFS = "/sys/devices/platform/soc/"
 BATTERY_UEVENT = "/sys/class/power_supply/battery/uevent"
+USB_UEVENT = "/sys/class/power_supply/usb/uevent"
 MCA_LOG_DIR = "/data/vendor/bsplog/charge/charge_logger/mca_log"
 THERMAL_DUMP = "/data/vendor/thermal/thermal.dump"
 
@@ -253,7 +254,7 @@ class AdbReader:
 
     def read_batch(self) -> dict[str, dict]:
         """Returns {node_id: {raw, ok, value}} for all NODES plus battery uevent."""
-        paths = [BASE_SYSFS + n["path"] for n in NODES] + [BATTERY_UEVENT]
+        paths = [BASE_SYSFS + n["path"] for n in NODES] + [BATTERY_UEVENT, USB_UEVENT]
         if not self.available:
             return {}
         script = "; ".join(f"echo '###{i}'; cat '{p}'" for i, p in enumerate(paths))
@@ -352,6 +353,8 @@ class AdbReader:
                    "strategy_quickchg_map_ibus_to_fsw|"
                    "cur_work_cp|"
                    "strategy_buckchg_charge_limit|"
+                   "strategy_buckchg_update_charge_status|"
+                   "mca_quick_charge_regulation|"
                    "mca_wireless_quick_charge_select_cur_work_mode|"
                    "mca_wireless_quick_charge_select_max_ibat")
         try:
@@ -396,8 +399,10 @@ class AdbReader:
         result: dict[str, dict] = {}
         for i, lines in blocks.items():
             if i == count - 1:
+                result["usb_uevent"] = {"raw": "\n".join(lines), "ok": bool(lines)}
+            elif i == count - 2:
                 result["battery_uevent"] = {"raw": "\n".join(lines), "ok": bool(lines)}
-            elif i < count - 1:
+            elif i < count - 2:
                 raw = "\n".join(lines).strip()
                 node = NODES[i]
                 result[node["id"]] = {"raw": raw, "value": raw, "ok": bool(raw)}
@@ -790,6 +795,87 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0):
     }
 
 
+WIRED_BUCK_TELEMETRY_RE = re.compile(
+    r"strategy_buckchg_update_charge_status:1463 pmic_chg_status: (\d+), "
+    r"chg_status: (\d+), chg_en: \[(\d+)\]\[(\w+)\], chg_type: (\d+), "
+    r"vbat: (\d+), vbus: (\d+), ibus: (\d+)")
+
+WIRED_CP_TELEMETRY_RE = re.compile(
+    r"mca_quick_charge_regulation:1942 cur_stage\[(\d+)\]: "
+    r"adp_volt: (\d+)/(\d+), "
+    r"ibat: ([\d\-]+)/([\d\-]+)/([\d\-]+)/([\d\-]+), "
+    r"vbat: (\d+)/(\d+), ibus: (\d+),")
+
+# 日志采集周期约 10s：阈值取“略宽于采集周期”，避免每次都误标陈旧。
+# regulation 正常约 0.7s 一条，buckchg status 约 10s 一条。
+WIRED_TELEMETRY_STALE_MS = {
+    "quick_charge_regulation": 12000,
+    "buckchg_telemetry": 25000,
+}
+
+
+def _latest_line_match(text: str, pattern: re.Pattern):
+    """返回文本中最后一次匹配 (match, time_match)。"""
+    m = None
+    tm = None
+    for line in text.splitlines():
+        mm = pattern.search(line)
+        if mm:
+            m = mm
+            tm = VOTE_TIME_RE.search(line)
+    return m, tm
+
+
+def parse_wired_buck_telemetry(text: str, offset_minutes: int = 0) -> dict | None:
+    """最新一条 buckchg 状态行：vbus/ibus 为 µV/µA，返回 mV/mA。"""
+    m, tm = _latest_line_match(text, WIRED_BUCK_TELEMETRY_RE)
+    if m is None:
+        return None
+    return {
+        "vbus_mv": int(m.group(7)) / 1000.0,
+        "ibus_ma": int(m.group(8)) / 1000.0,
+        "chg_en": int(m.group(3)),
+        "chg_en_client": m.group(4),
+        "chg_type": int(m.group(5)),
+        "source": "buckchg_telemetry",
+        "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+        "at": int(time.time() * 1000),
+    }
+
+
+def parse_wired_cp_telemetry(text: str, offset_minutes: int = 0) -> dict | None:
+    """最新一条有线 quick charge regulation 行。
+
+    adp_volt 第一值为请求值、第二值为实测值（mV）；ibus 单位为 mA。
+    """
+    m, tm = _latest_line_match(text, WIRED_CP_TELEMETRY_RE)
+    if m is None:
+        return None
+    return {
+        "vbus_mv": int(m.group(3)),
+        "ibus_ma": int(m.group(10)),
+        "chg_en": 1,
+        "chg_en_client": "quick_charge",
+        "chg_type": None,
+        "source": "quick_charge_regulation",
+        "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+        "at": int(time.time() * 1000),
+    }
+
+
+def is_wired_disconnected(text: str) -> bool:
+    """最新一条有线会话边界是否为断开（usb online: 0 / real_type => 0）。"""
+    last = ""
+    for line in text.splitlines():
+        if "usb online:" in line or "real_type changed:" in line:
+            last = line
+    if not last:
+        return False
+    if "usb online: 0" in last:
+        return True
+    return bool(re.search(r"real_type changed: \d+ => 0", last))
+
+
 def is_last_wireless_power_off(text: str) -> bool:
     """True if the last wireless power event is removal (power_good_off)."""
     return (
@@ -967,6 +1053,9 @@ class Sampler:
         self.last_wired_cp_ratio: int | None = None
         self.last_wired_cur_cp: bool = False
         self.last_wired_buck: bool = False
+        # 有线输入遥测缓存：CP 与 Buck 各留一份，按 wired_cp.state 选择来源
+        self.last_wired_cp_tel: dict | None = None
+        self.last_wired_buck_tel: dict | None = None
 
     def start(self) -> None:
         threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
@@ -1015,10 +1104,13 @@ class Sampler:
         with self.lock:
             sample = {
                 "t": parsed["ts"],
+                "input_source": parsed["derived"].get("input_source"),
+                "input_voltage_mv": parsed["derived"].get("input_voltage_mv"),
+                "input_current_ma": parsed["derived"].get("input_current_ma"),
+                "input_power_w": parsed["derived"].get("input_power_w"),
                 "vout": parsed["derived"].get("vout"),
                 "vrect": parsed["derived"].get("vrect"),
                 "iout": parsed["derived"].get("iout"),
-                "input_power_w": parsed["derived"].get("input_power_w"),
                 "battery_power_w": parsed["derived"].get("battery_power_w"),
                 "batt_current_ma": parsed["derived"].get("batt_current_ma"),
                 "batt_voltage_mv": parsed["derived"].get("batt_voltage_mv"),
@@ -1087,6 +1179,19 @@ class Sampler:
             state = parse_session_cp_state(pp_log, self.adb.utc_offset_minutes)
             w_cp_mode, w_cp_work_mode, w_decision, w_boundary = state["wireless"]
             d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary = state["wired"]
+            # 有线输入遥测：CP regulation 与 Buck status 各解析一份
+            if is_wired_disconnected(pp_log):
+                self.last_wired_cp_tel = None
+                self.last_wired_buck_tel = None
+            else:
+                cp_tel = parse_wired_cp_telemetry(
+                    pp_log, self.adb.utc_offset_minutes)
+                buck_tel = parse_wired_buck_telemetry(
+                    pp_log, self.adb.utc_offset_minutes)
+                if cp_tel is not None:
+                    self.last_wired_cp_tel = cp_tel
+                if buck_tel is not None:
+                    self.last_wired_buck_tel = buck_tel
             # 无线 track：power_good 边界
             if w_boundary:
                 self.last_cp_mode = w_cp_mode
@@ -1238,7 +1343,12 @@ class Sampler:
                       "MODEL_NAME", "PRESENT", "CAPACITY_LEVEL"):
                 v = parsed.get(k, "")
                 battery[k.lower()] = {"raw": v, "value": v, "ok": bool(v)}
-        return {"nodes": nodes, "battery": battery}
+        usb: dict[str, str] = {}
+        if "usb_uevent" in batch:
+            parsed = parse_uevent(batch["usb_uevent"]["raw"])
+            for k in ("ONLINE", "TYPE", "VOLTAGE_NOW", "CURRENT_NOW"):
+                usb[k.lower()] = parsed.get(k, "")
+        return {"nodes": nodes, "battery": battery, "usb": usb}
 
     def _build(self, raw: dict) -> dict:
         nodes = raw["nodes"]
@@ -1270,7 +1380,85 @@ class Sampler:
 
         vout = wls.get("vout")
         iout = wls.get("iout")
-        input_power = (vout * iout / 1e6) if vout is not None and iout is not None else None
+        wireless_power = (
+            (vout * iout / 1e6)
+            if vout is not None and iout is not None
+            else None
+        )
+
+        # 有线输入遥测：按 wired_cp.state 选择来源（CP→regulation，Buck→buckchg，
+        # unknown→最新一条），USB uevent 仅作兜底且永远带 source/时间。
+        usb = raw.get("usb", {})
+        usb_online = str(usb.get("online", "")) == "1"
+        usb_known_off = str(usb.get("online", "")) == "0"
+        usb_vbus_mv = num(usb.get("voltage_now", ""))
+        if usb_vbus_mv is not None:
+            usb_vbus_mv /= 1000.0          # uV -> mV
+        usb_ibus_ma = num(usb.get("current_now", ""))
+        if usb_ibus_ma is not None:
+            usb_ibus_ma /= 1000.0          # uA -> mA
+
+        wstate = self.last_wired_state
+        cp_tel = self.last_wired_cp_tel
+        buck_tel = self.last_wired_buck_tel
+        if wstate == "cp":
+            chosen = cp_tel or buck_tel
+        elif wstate == "buck":
+            chosen = buck_tel or cp_tel
+        elif cp_tel and buck_tel:
+            chosen = cp_tel if cp_tel["log_time"] >= buck_tel["log_time"] else buck_tel
+        else:
+            chosen = cp_tel or buck_tel
+
+        now_ms = int(ts * 1000)
+        wired_stale = False
+        if chosen is not None:
+            age = now_ms - chosen["at"]
+            wired_stale = age > WIRED_TELEMETRY_STALE_MS.get(chosen["source"], 30000)
+        # 遥测已陈旧且 USB uevent 在线时，用每 3s 快采的 uevent 覆盖（仍保留 source）
+        if chosen is not None and not usb_known_off and not (wired_stale and usb_online):
+            wired_vbus_mv = chosen["vbus_mv"]
+            wired_ibus_ma = chosen["ibus_ma"]
+            wired_source = chosen["source"]
+            wired_log_time = chosen["log_time"]
+            wired_at = chosen["at"]
+        elif usb_online:
+            wired_vbus_mv = usb_vbus_mv
+            wired_ibus_ma = usb_ibus_ma
+            wired_source = "usb_uevent"
+            wired_log_time = ""
+            wired_at = now_ms
+            wired_stale = False
+        else:
+            wired_vbus_mv = None
+            wired_ibus_ma = None
+            wired_source = None
+            wired_log_time = ""
+            wired_at = None
+            wired_stale = False
+        wired_power = (
+            wired_vbus_mv * wired_ibus_ma / 1000.0
+            if wired_vbus_mv is not None and wired_ibus_ma is not None
+            else None
+        )
+        wired_online = wired_vbus_mv is not None and wired_ibus_ma is not None
+
+        # 当前输入源抽象层：有线优先（避免旧无线残留值覆盖），无输入时为 none
+        if wired_online:
+            input_source = "wired"
+            input_vol_mv = wired_vbus_mv
+            input_cur_ma = wired_ibus_ma
+            input_power = wired_power
+        elif vout is not None and iout is not None and (vout != 0 or iout != 0):
+            input_source = "wireless"
+            input_vol_mv = vout
+            input_cur_ma = iout
+            input_power = wireless_power
+        else:
+            input_source = "none"
+            input_vol_mv = None
+            input_cur_ma = None
+            input_power = None
         # 电池功率保留正负号（充电为正、放电为负）
         battery_power = (
             batt_cur_ma * batt_vol_mv / 1e6
@@ -1280,7 +1468,19 @@ class Sampler:
 
         derived = {
             "vout": vout, "vrect": wls.get("vrect"), "iout": iout,
+            "input_source": input_source,
             "input_power_w": round(input_power, 2) if input_power is not None else None,
+            "input_voltage_mv": input_vol_mv,
+            "input_current_ma": input_cur_ma,
+            "wired_online": wired_online,
+            "wired_vbus_mv": round(wired_vbus_mv, 1) if wired_vbus_mv is not None else None,
+            "wired_ibus_ma": round(wired_ibus_ma, 1) if wired_ibus_ma is not None else None,
+            "wired_input_power_w": round(wired_power, 2) if wired_power is not None else None,
+            "wired_input_source": wired_source,
+            "wired_input_at": wired_at,
+            "wired_input_log_time": wired_log_time,
+            "wired_input_stale": wired_stale,
+            "wired_usb_online": usb_online,
             "battery_power_w": round(battery_power, 2) if battery_power is not None else None,
             "batt_current_ma": round(batt_cur_ma, 1) if batt_cur_ma is not None else None,
             "batt_voltage_mv": round(batt_vol_mv, 1) if batt_vol_mv is not None else None,
