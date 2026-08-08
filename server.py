@@ -316,7 +316,8 @@ class AdbReader:
                    "FAST_CHARGE|fast chg success|set chg current|open path ibus|"
                    "smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|"
                    "strategy_wireless_get_charging_info|"
-                   "mca_wireless_quick_charge_select_max_ibat")
+                   "mca_wireless_quick_charge_select_max_ibat|"
+                   "sc8581_set_operation_mode")
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)
@@ -595,6 +596,14 @@ def parse_buck_fcc(text: str) -> int | None:
     return last
 
 
+def parse_cp_mode(text: str) -> int | None:
+    """Latest sc8581 charge-pump operation mode (0=off, >0=CP 路径生效)."""
+    last = None
+    for m in re.finditer(r"set operation mode (\d+)", text):
+        last = int(m.group(1))
+    return last
+
+
 def is_last_wireless_power_off(text: str) -> bool:
     """True if the last wireless power event is removal (power_good_off)."""
     return (
@@ -759,6 +768,8 @@ class Sampler:
         # quick wireless 最终电池电流目标（CP 快充路径真正约束电流的值），cur_max 缺失时回退 buck_fcc
         self.last_quick_cur_max: int | None = None
         self.last_buck_fcc: int | None = None
+        # sc8581 电荷泵工作模式：>0 表示 CP 路径生效（此时 buck 输入限流不约束实际电流）
+        self.last_cp_mode: int | None = None
 
     def start(self) -> None:
         threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
@@ -848,6 +859,7 @@ class Sampler:
                 self.last_epp = None
                 self.last_quick_cur_max = None
                 self.last_buck_fcc = None
+                self.last_cp_mode = None
             else:
                 icl = parse_wls_icl(session_log, self.adb.utc_offset_minutes)
                 if icl is not None:
@@ -865,6 +877,9 @@ class Sampler:
                 buck_fcc = parse_buck_fcc(session_log)
                 if buck_fcc is not None:
                     self.last_buck_fcc = buck_fcc
+                cp_mode = parse_cp_mode(session_log)
+                if cp_mode is not None:
+                    self.last_cp_mode = cp_mode
 
         self.logs_stale = not vote_read_ok or not session_read_ok
         self.logs_updated_at = time.time() * 1000
@@ -904,6 +919,7 @@ class Sampler:
                 buck["actual_limit_source"] = (
                     "quick_wireless cur_max" if self.last_quick_cur_max is not None
                     else "wireless loop buck_fcc")
+            buck["cp_active"] = bool(self.last_cp_mode and self.last_cp_mode > 0)
         meta = core.setdefault("meta", {})
         meta.update({
             "interval": self.fast_interval,

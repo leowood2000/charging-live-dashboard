@@ -604,6 +604,17 @@ function renderVoters(d) {
     if (isDeviceModelTable(t) || isProtocolTable(t) || isStaticParam(t)) return false;
     if (t === "quick_chg_disable" && wirelessActive) return false;      // 无线充电时隐藏有线快充禁用
     if (t === "wls_quick_chg_disable" && !wirelessActive) return false; // 非无线时隐藏无线快充禁用
+    if (t === "wireless_buck_input") {
+      const b = topics[t];
+      const iout = d.derived && d.derived.iout;
+      const vrect = d.derived && d.derived.vrect;
+      const vbat = d.derived && d.derived.batt_voltage_mv;
+      // 电荷泵路径生效：buck 输入限流不在实际功率路径上，隐藏整张卡
+      if (b && b.cp_active) return false;
+      // 物理兜底：iout 远超 icl 物理上限（icl × vrect / vbat）同样视为未生效
+      if (b && b.icl !== null && b.icl !== undefined && iout !== null && iout !== undefined
+          && vrect > 0 && vbat > 0 && iout > b.icl * vrect / vbat * 1.25 + 50) return false;
+    }
     const b = topics[t];
     const hasEnabled = (b.rows || []).some(r => r.enable === 1);
     return hasEnabled
