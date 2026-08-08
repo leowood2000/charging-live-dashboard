@@ -599,6 +599,9 @@ function renderVoters(d) {
   const isStaticParam = t => t === "term_volt" || t === "term_curr";
   // 当前是否无线充电（vrect 有值），用于有线/无线快充禁用卡的动态显示
   const wirelessActive = !!(d.derived && d.derived.vrect > 0);
+  // 是否真正在充电：以 battery STATUS 为准（缺失时保守显示）
+  const battSt = (d.battery && d.battery.status && d.battery.status.value || "").toLowerCase();
+  const chargingNow = battSt === "" ? true : battSt.includes("charging");
   // 只显示与当前连接/状态相关的投票主题：有启用票，或驱动已给出实际投票结果
   const relevant = keys.filter(t => {
     if (isDeviceModelTable(t) || isProtocolTable(t) || isStaticParam(t)) return false;
@@ -664,7 +667,7 @@ function renderVoters(d) {
   };
   const buck = topics.wireless_buck_input;
   const mcaEff = effectiveOf(buck);
-  if (wirelessActive) {
+  if (chargingNow && wirelessActive) {
     const ratio = buck && buck.cp_ratio
       ? (buck.cp_ratio === 1 ? "1:1（bypass）"
           : buck.cp_ratio === 2 ? "2:1（div2）"
@@ -696,7 +699,7 @@ function renderVoters(d) {
     ? { client: buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc",
         value: buck.actual_limit, calc: false, replaced: true }
     : mcaEff;
-  if (wlsEff) {
+  if (chargingNow && wlsEff) {
     const tip = wlsEff.replaced
       ? "无线输入限流仲裁值未实际生效，此处显示电池侧真正约束电流的限流（quick_wireless cur_max / buck_fcc），不是无线输入电流"
       : (wlsEff.calc
@@ -706,12 +709,14 @@ function renderVoters(d) {
     summary.push(`<span class="chip" title="${tip}">` +
       `${wlsLabel}<b>${wlsEff.value}</b><small>${esc(wlsEff.client)}${wlsEff.calc ? " · 推算" : ""}</small></span>`);
   }
-  addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
-  addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
-  if (!wirelessActive) {
-    addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
-  } else {
-    addSummary("无线快充禁用", effectiveOf(topics.wls_quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
+  if (chargingNow) {
+    addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+    addSummary("充电使能", effectiveOf(topics.chg_enable), v => (v === 1 ? "ON" : "OFF"));
+    if (!wirelessActive) {
+      addSummary("有线快充禁用", effectiveOf(topics.quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
+    } else {
+      addSummary("无线快充禁用", effectiveOf(topics.wls_quick_chg_disable), v => (v === 0 ? "未禁用" : "已禁用"));
+    }
   }
   const th = d.thermal || {};
   if (th.scene) {
@@ -787,7 +792,7 @@ function renderVoters(d) {
   }
   // CP 路径生效时，wireless_buck_input 折叠进仲裁详情（不彻底删除）
   let buckDetail = "";
-  if (buckCp) {
+  if (chargingNow && buckCp) {
     const bt = topics.wireless_buck_input;
     const resTxt = resultValid(bt)
       ? `<span class="vote-result">名义仲裁 ${esc(bt.result.client)} → ${bt.result.value}${bt.unit || ""}</span>` : "";
@@ -796,7 +801,12 @@ function renderVoters(d) {
       `<div class="vote-head">${resTxt}</div>` +
       `<div class="vote-chips">${chipHtml(bt)}</div></details>`;
   }
-  el.innerHTML = summaryCard + cards + buckDetail + jeitaCard;
+  const cardsShown = chargingNow ? cards : "";
+  const notChargingNote = !chargingNow
+    ? `<div class="card"><h2>电流投票实时表<span class="tag">未充电</span></h2>` +
+      `<p class="note">当前未充电（battery STATUS ≠ Charging），投票/仲裁不生效。</p></div>`
+    : "";
+  el.innerHTML = summaryCard + notChargingNote + cardsShown + buckDetail + jeitaCard;
 }
 
 function renderCharts(d) {
