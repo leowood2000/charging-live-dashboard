@@ -958,20 +958,9 @@ function renderVoters(d) {
       } else if (wlsMode === "bpp_drawload") {
         summary.push(`<span class="chip" title="BPP drawload 环控制：iwls 与 iout 同域">当前无线模式<b>BPP · drawload</b></span>`);
       }
-      // 无线路径：quick wireless cur_max → 电池侧算法上限；缺失时回退 wireless loop buck_fcc；最后才是 buck_charge_curr
-      const dec = buck && buck.cur_max_decision;
-      if (dec && dec.final !== null && dec.final !== undefined) {
-        const decAge = dec.at ? Math.max(0, Math.round((Date.now() - dec.at) / 1000)) : null;
-        const stale = decAge !== null && decAge > 30;
-        summary.push(`<span class="chip"${stale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} ` +
-          `title="quick wireless select_max_ibat 的最终电池电流目标（非 MCA votable）${dec.log_time ? " · 日志 " + esc(dec.log_time) : ""}">` +
-          `电池侧算法上限<b>${dec.final}</b><small>quick_wireless cur_max${decAge !== null ? " · " + decAge + "s前" : ""}${stale ? " · 历史值/待刷新" : ""}</small></span>`);
-      } else if (buck && buck.actual_limit !== null && buck.actual_limit !== undefined) {
-        const src = buck.actual_limit_source === "quick_wireless cur_max" ? "quick_wireless cur_max" : "buck_fcc";
-        summary.push(`<span class="chip" title="电池侧充电电流上限（quick_wireless cur_max / buck_fcc）">电池侧算法上限<b>${buck.actual_limit}</b><small>${esc(src)}</small></span>`);
-      } else {
-        addSummary("充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
-      }
+      // 无线路径：电池侧只显示 buck_charge_curr 的 MCA 仲裁结果（最终生效值）；
+      // quick_wireless cur_max 不进总仲裁（保留在下方 Quick Wireless 电池电流决策卡）
+      addSummary("电池充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
     }
     addSummary("充电使能", ceEff, v => (v === 1 ? "ON" : "OFF"));
     if (ceStopping) {
