@@ -833,10 +833,10 @@ function renderVoters(d) {
   const wlsMode = buck && buck.wls_mode;
   // 只有 BPP drawload 阶段 iwls 与 iout 同域，才做一致性检查；
   // EPP+/QC 阶段 wls_icl 与 iout 属于不同控制域，禁止比较
-  const iclBad = wlsMode === "bpp" && buck && buck.icl !== undefined && buck.icl !== null
+  const iclBad = wlsMode === "bpp_drawload" && buck && buck.icl !== undefined && buck.icl !== null
     ? iclNotEffective(buck.icl, ioutNow) : false;
-  // 无线输入限流：仅无线路径显示，避免有线接管后残留无线缓存冒充当前数据
-  if (chargingNow && wirelessActive && buck) {
+  // 无线输入限流：仅 BPP drawload 阶段进入总仲裁；EPP+/QC 阶段只保留在详情卡
+  if (chargingNow && wirelessActive && buck && wlsMode === "bpp_drawload") {
     const wlsClient = (mcaEff && mcaEff.client) || "icl";
     const wlsValue = (buck.icl !== null && buck.icl !== undefined)
       ? buck.icl : (mcaEff ? mcaEff.value : null);
@@ -844,11 +844,8 @@ function renderVoters(d) {
       const chain = mcaEff
         ? `${esc(mcaEff.client)} → wireless_buck_input=${mcaEff.value} → effective=${mcaEff.value} → wireless loop icl=${buck.icl !== undefined && buck.icl !== null ? buck.icl : "-"}（驱动实际下发）`
         : `wireless loop icl=${buck.icl}（驱动实际下发）`;
-      const modeNote = wlsMode === "epp_plus"
-        ? "；EPP+/QC 模式：wls_icl 与 iout 属于不同控制域"
-        : iclBad ? "；实际输入电流远超该限流，当前未生效（见仲裁详情）" : "";
-      const tip = chain + modeNote;
-      const modeTag = iclBad ? " · 未生效" : wlsMode === "epp_plus" ? " · 名义值" : "";
+      const tip = chain + (iclBad ? "；实际输入电流远超该限流，当前未生效（见仲裁详情）" : "");
+      const modeTag = iclBad ? " · 未生效" : "";
       summary.push(`<span class="chip"${iclBad ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="${tip}">` +
         `无线输入限流<b>${wlsValue}</b><small>${esc(wlsClient)}${modeTag}</small></span>`);
     }
@@ -953,6 +950,22 @@ function renderVoters(d) {
         addSummary("电池充电上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
       }
     } else if (wirelessActive) {
+      // 无线协议控制域（前级）与后级 Buck/CP 路径是独立维度：
+      // BPP drawload 才把 wls_icl 当输入限流；EPP+/QC 只展示 RX 侧上限与实测输出
+      if (wlsMode === "epp_qc") {
+        summary.push(`<span class="chip" title="RX/TX 功率协商控制（EPP+/QC），与后级 Buck/CP 路径独立">当前无线模式<b>EPP+/QC</b></span>`);
+        if (buck && buck.rx_iout_limit !== null && buck.rx_iout_limit !== undefined) {
+          summary.push(`<span class="chip" title="strategy_class_wireless_op_get_rx_iout_limit 输出（驱动策略层上限，未确认对应芯片寄存器）">RX 输出电流上限<b>${fmt(buck.rx_iout_limit, 0)}</b><small>mA · driver</small></span>`);
+        }
+        if (ioutNow !== null && ioutNow !== undefined) {
+          summary.push(`<span class="chip" title="wls_debug 线圈侧实际输出电流">实际 RX 输出电流<b>${fmt(ioutNow, 0)}</b><small>mA · wls_debug</small></span>`);
+        }
+      } else if (wlsMode === "bpp_drawload") {
+        summary.push(`<span class="chip" title="BPP drawload 环控制：iwls 与 iout 同域">当前无线模式<b>BPP · drawload</b></span>`);
+        if (ioutNow !== null && ioutNow !== undefined) {
+          summary.push(`<span class="chip" title="wls_debug 线圈侧实际输出电流">实际 RX 输出电流<b>${fmt(ioutNow, 0)}</b><small>mA · wls_debug</small></span>`);
+        }
+      }
       // 无线路径：quick wireless cur_max → 电池侧算法上限；缺失时回退 wireless loop buck_fcc；最后才是 buck_charge_curr
       const dec = buck && buck.cur_max_decision;
       if (dec && dec.final !== null && dec.final !== undefined) {
@@ -1028,11 +1041,12 @@ function renderVoters(d) {
     }
     let iclText = "";
     if (b.icl !== undefined && b.icl !== null) {
+      const isEpp = b.wls_mode === "epp_qc";
       const ago = b.icl_at ? Math.max(0, Math.round((Date.now() - b.icl_at) / 1000)) : null;
       let diff = "";
       if (resultValid(b)) diff = ` · Δ${b.icl - b.result.value}mA`;
-      iclText = `<span class="vote-result" title="驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）">实际下发 ICL <b>${b.icl}</b>mA` +
-        `<small>${b.icl_time ? esc(b.icl_time) + " " : ""}${ago !== null ? ago + "s前" : ""}${diff}` +
+      iclText = `<span class="vote-result" title="${isEpp ? "EPP+/QC 阶段：wls_icl 是策略控制量，非当前 iout 限流" : "驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）"}">${isEpp ? "wls_icl 控制量" : "实际下发 ICL"} <b>${b.icl}</b>mA` +
+        `<small>${b.icl_time ? esc(b.icl_time) + " " : ""}${ago !== null ? ago + "s前" : ""}${diff}${isEpp ? " · 非当前 iout 限流" : ""}` +
         (iclBad ? ` <span style="color:var(--amber);border:1px solid rgba(251,191,36,.5);border-radius:4px;padding:0 4px">限流未生效</span>` : "") +
         `</small></span>`;
     }
@@ -1043,9 +1057,9 @@ function renderVoters(d) {
     let modeText = "";
     if (t === "wireless_buck_input") {
       const wm = b.wls_mode;
-      if (wm === "bpp") {
+      if (wm === "bpp_drawload") {
         modeText = `<span class="vote-result" title="BPP drawload 环控制：iwls 与 iout 同域，可做一致性比较">控制模式 <b>BPP · drawload</b></span>`;
-      } else if (wm === "epp_plus") {
+      } else if (wm === "epp_qc") {
         modeText = `<span class="vote-result" title="EPP+/QC：wls_icl 与 iout 属于不同控制域，禁止用 ICL 判断未生效">控制模式 <b>EPP+/QC</b><small>wls_icl 与 iout 不同域</small></span>`;
       } else {
         modeText = `<span class="vote-result" title="无线控制模式未知">控制模式 <b>待确认</b></span>`;
@@ -1055,7 +1069,7 @@ function renderVoters(d) {
         modeText += `<span class="vote-result" title="xm_wls 是无线能力/适配器允许的最大输入电流票，不是当前仲裁 winner">无线能力票 xm_wls <b>${xmWls.value}</b><small>mA</small></span>`;
       }
       if (b.rx_iout_limit !== null && b.rx_iout_limit !== undefined) {
-        modeText += `<span class="vote-result" title="strategy_class_wireless_op_get_rx_iout_limit 输出的 RX 输出电流上限">RX 输出电流上限 <b>${fmt(b.rx_iout_limit, 0)}</b><small>mA · rx_iout_limit</small></span>`;
+        modeText += `<span class="vote-result" title="strategy_class_wireless_op_get_rx_iout_limit 输出（驱动策略层上限，未确认对应芯片寄存器）">RX 输出电流上限 <b>${fmt(b.rx_iout_limit, 0)}</b><small>mA · driver</small></span>`;
       }
     }
     return `<div class="card"><h2>${esc(t)}<span class="tag">生效 ${active}/${rows.length}</span></h2>` +

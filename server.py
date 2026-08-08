@@ -317,7 +317,8 @@ class AdbReader:
                    "FAST_CHARGE|fast chg success|set chg current|open path ibus|"
                    "smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|"
                    "strategy_wireless_get_charging_info|"
-                   "BPP drawload|rx_iout_limit|epp plus")
+                   "BPP drawload|rx_iout_limit|epp plus|EPP\\+|"
+                   "send_vout_range_request|set adapter voltage")
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)
@@ -946,26 +947,29 @@ def split_after_last_wireless_attach(text: str) -> str:
 def parse_wireless_mode(text: str) -> dict:
     """解析当前无线会话的控制模式与 RX 输出电流上限。
 
-    - BPP drawload 行存在 → bpp：drawload 环控制，iwls≈iout，ICL/iout 同域
-    - epp plus / rx_iout_limit / can quick charge → epp_plus/QC：
-      wls_icl 与 iout 属于不同控制域，不能做一致性比较
+    同一 power_good_on 会话内按日志顺序扫描，最后证据覆盖前证据：
+    - BPP drawload → bpp_drawload：drawload 环控制，iwls≈iout，ICL/iout 同域
+    - epp plus / EPP+ / rx_iout_limit / can quick charge! / vout range request
+      → epp_qc：wls_icl 与 iout 属于不同控制域，不能做一致性比较
     """
     mode = "unknown"
     rx_iout_limit: int | None = None
     qc_enabled = False
     for line in text.splitlines():
         if "BPP drawload" in line:
-            mode = "bpp"
-        if "epp plus" in line:
-            mode = "epp_plus"
+            mode = "bpp_drawload"
+        if ("epp plus" in line or "EPP+" in line
+                or "send_vout_range_request" in line
+                or "set adapter voltage" in line
+                or "rx_iout_limit" in line
+                or "can quick charge!" in line):
+            mode = "epp_qc"
         # 函数名 strategy_class_wireless_op_get_rx_iout_limit:421 里的行号
         # 也会匹配，必须取该行最后一次匹配（真正的 rx_iout_limit: 3800）
         for mm in re.finditer(r"rx_iout_limit:\s*(\d+)", line):
             rx_iout_limit = int(mm.group(1))
         if "can quick charge!" in line:
             qc_enabled = True
-    if qc_enabled and mode == "unknown":
-        mode = "epp_plus"
     return {"mode": mode, "rx_iout_limit": rx_iout_limit,
             "qc_enabled": qc_enabled}
 
