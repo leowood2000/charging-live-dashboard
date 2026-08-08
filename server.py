@@ -318,7 +318,12 @@ class AdbReader:
                    "strategy_wireless_get_charging_info|"
                    "mca_wireless_quick_charge_select_max_ibat|"
                    "sc8581_set_operation_mode|"
-                   "mca_wireless_quick_charge_select_cur_work_mode")
+                   "mca_wireless_quick_charge_select_cur_work_mode|"
+                   "usb online|real_type changed|"
+                   "mca_quick_charge_update_work_mode_para|"
+                   "strategy_quickchg_map_ibus_to_fsw|"
+                   "mca_quick_charge_select_max_ibat|"
+                   "mca_quick_charge_select_cur_work_mode")
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)

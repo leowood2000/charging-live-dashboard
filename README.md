@@ -24,6 +24,7 @@
 - 功率路径三态显示：cp（本会话 operation mode>0，附 2:1 等分压比）/ buck（本会话明确 mode=0）/ Buck / CP 未激活（待确认）（本会话尚无 SC8581 模式日志）
 - 有线功率路径正式接入：会话边界（`usb online` / `real_type changed` / `power_good`）内按时间顺序取最后一次 `sc8581 operation mode` 判定 cp/buck；`quickchg work_mode` 与 `map_ibus_to_fsw ratio` 提供分压比；`cur_work_cp` 作交叉证据；输出 `derived.wired_cp`
 - 有线 CP 激活时只显示对应比例的 div 卡（4:1 → div4_single/div4_multi）+ single/multi_chg_cur + thermal_flip；Buck/未知时隐藏全部 div，保留 buck_input / buck_charge_curr / chg_enable / quick_chg_disable / input_voltage / smartchg_delta_ichg / JEITA；`buck_5v/9v_*` 档位表与 `wireless_*` 始终隐藏
+- 日志抓取白名单补齐有线 quickchg 信号（`update_work_mode_para` / `map_ibus_to_fsw` / `mca_quick_charge_select_max_ibat` / `select_cur_work_mode`）与有线会话边界（`usb online` / `real_type changed`）
 - **仲裁展示分离**：`effective vote is now`（MCA 逻辑仲裁）、`wireless loop icl`（驱动实际下发限流）、`wls_debug iout`（实时输出电流）三组独立展示，ICL 与 iout 偏差超过 200mA 时提示“可能为旧日志或不同控制阶段”
 - **会话档案**：以 `power_good_on` 建立会话，`power_good_off` 记入“充电板移除”事件；保留全部电流变化与 open path 事件；最多 3 个会话、每个会话最多 100 条事件
 - **日志容错**：日志读取失败保留上次成功数据并标记 `logs_stale`；读取成功但 grep 无匹配不算失败
