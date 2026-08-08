@@ -817,7 +817,10 @@ function renderVoters(d) {
     const expectMax = icl * vrectNow / vbatNow;
     return iout > expectMax * 1.25 + 50;
   };
-  const iclBad = buck && buck.icl !== undefined && buck.icl !== null
+  const wlsMode = buck && buck.wls_mode;
+  // 只有 BPP drawload 阶段 iwls 与 iout 同域，才做一致性检查；
+  // EPP+/QC 阶段 wls_icl 与 iout 属于不同控制域，禁止比较
+  const iclBad = wlsMode === "bpp" && buck && buck.icl !== undefined && buck.icl !== null
     ? iclNotEffective(buck.icl, ioutNow) : false;
   // 无线输入限流：优先显示驱动实际下发的 wireless loop icl，证据链 soc_limit → effective → icl
   if (chargingNow && buck) {
@@ -828,9 +831,13 @@ function renderVoters(d) {
       const chain = mcaEff
         ? `${esc(mcaEff.client)} → wireless_buck_input=${mcaEff.value} → effective=${mcaEff.value} → wireless loop icl=${buck.icl !== undefined && buck.icl !== null ? buck.icl : "-"}（驱动实际下发）`
         : `wireless loop icl=${buck.icl}（驱动实际下发）`;
-      const tip = chain + (iclBad ? "；实际输入电流远超该限流，当前未生效（见仲裁详情）" : "");
+      const modeNote = wlsMode === "epp_plus"
+        ? "；EPP+/QC 模式：wls_icl 与 iout 属于不同控制域"
+        : iclBad ? "；实际输入电流远超该限流，当前未生效（见仲裁详情）" : "";
+      const tip = chain + modeNote;
+      const modeTag = iclBad ? " · 未生效" : wlsMode === "epp_plus" ? " · 名义值" : "";
       summary.push(`<span class="chip"${iclBad ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="${tip}">` +
-        `无线输入限流<b>${wlsValue}</b><small>${esc(wlsClient)}${iclBad ? " · 未生效" : ""}</small></span>`);
+        `无线输入限流<b>${wlsValue}</b><small>${esc(wlsClient)}${modeTag}</small></span>`);
     }
   }
   if (chargingNow) {
@@ -943,8 +950,26 @@ function renderVoters(d) {
     if (t === "wireless_buck_input" && ioutNow !== null) {
       ioutText = `<span class="vote-result" title="wls_debug 实时输出电流">实时 iout <b>${fmt(ioutNow, 0)}</b><small>mA</small></span>`;
     }
+    let modeText = "";
+    if (t === "wireless_buck_input") {
+      const wm = b.wls_mode;
+      if (wm === "bpp") {
+        modeText = `<span class="vote-result" title="BPP drawload 环控制：iwls 与 iout 同域，可做一致性比较">控制模式 <b>BPP · drawload</b></span>`;
+      } else if (wm === "epp_plus") {
+        modeText = `<span class="vote-result" title="EPP+/QC：wls_icl 与 iout 属于不同控制域，禁止用 ICL 判断未生效">控制模式 <b>EPP+/QC</b><small>wls_icl 与 iout 不同域</small></span>`;
+      } else {
+        modeText = `<span class="vote-result" title="无线控制模式未知">控制模式 <b>待确认</b></span>`;
+      }
+      const xmWls = (b.rows || []).find(r => r.client === "xm_wls");
+      if (xmWls && xmWls.enable === 1) {
+        modeText += `<span class="vote-result" title="xm_wls 是无线能力/适配器允许的最大输入电流票，不是当前仲裁 winner">无线能力票 xm_wls <b>${xmWls.value}</b><small>mA</small></span>`;
+      }
+      if (b.rx_iout_limit !== null && b.rx_iout_limit !== undefined) {
+        modeText += `<span class="vote-result" title="strategy_class_wireless_op_get_rx_iout_limit 输出的 RX 输出电流上限">RX 输出电流上限 <b>${fmt(b.rx_iout_limit, 0)}</b><small>mA · rx_iout_limit</small></span>`;
+      }
+    }
     return `<div class="card"><h2>${esc(t)}<span class="tag">生效 ${active}/${rows.length}</span></h2>` +
-      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}${ioutText}</div>` +
+      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}${ioutText}${modeText}</div>` +
       `<div class="vote-chips">${chips}</div></div>`;
   }).join("");
   // JEITA 终止参数是温度档决定的静态常数，合并为一张卡

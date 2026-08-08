@@ -316,7 +316,8 @@ class AdbReader:
         pattern = ("power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|"
                    "FAST_CHARGE|fast chg success|set chg current|open path ibus|"
                    "smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|"
-                   "strategy_wireless_get_charging_info")
+                   "strategy_wireless_get_charging_info|"
+                   "BPP drawload|rx_iout_limit|epp plus")
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)
@@ -891,6 +892,43 @@ def has_wired_boundary(text: str) -> bool:
                for line in text.splitlines())
 
 
+def split_after_last_wireless_attach(text: str) -> str:
+    """只保留最后一次 wireless power_good_on 之后的日志段。"""
+    lines = text.splitlines()
+    last = -1
+    for i, line in enumerate(lines):
+        if "power_good_on" in line:
+            last = i
+    return "\n".join(lines[last + 1:]) if last >= 0 else text
+
+
+def parse_wireless_mode(text: str) -> dict:
+    """解析当前无线会话的控制模式与 RX 输出电流上限。
+
+    - BPP drawload 行存在 → bpp：drawload 环控制，iwls≈iout，ICL/iout 同域
+    - epp plus / rx_iout_limit / can quick charge → epp_plus/QC：
+      wls_icl 与 iout 属于不同控制域，不能做一致性比较
+    """
+    mode = "unknown"
+    rx_iout_limit: int | None = None
+    qc_enabled = False
+    for line in text.splitlines():
+        if "BPP drawload" in line:
+            mode = "bpp"
+        if "epp plus" in line:
+            mode = "epp_plus"
+        # 函数名 strategy_class_wireless_op_get_rx_iout_limit:421 里的行号
+        # 也会匹配，必须取该行最后一次匹配（真正的 rx_iout_limit: 3800）
+        for mm in re.finditer(r"rx_iout_limit:\s*(\d+)", line):
+            rx_iout_limit = int(mm.group(1))
+        if "can quick charge!" in line:
+            qc_enabled = True
+    if qc_enabled and mode == "unknown":
+        mode = "epp_plus"
+    return {"mode": mode, "rx_iout_limit": rx_iout_limit,
+            "qc_enabled": qc_enabled}
+
+
 def is_last_wireless_power_off(text: str) -> bool:
     """True if the last wireless power event is removal (power_good_off)."""
     return (
@@ -1073,6 +1111,9 @@ class Sampler:
         self.last_wired_buck_tel: dict | None = None
         # 新会话/协议变化后尚无策略遥测：页面回退 USB uevent 并标记“等待策略遥测”
         self.last_wired_tel_waiting = False
+        # 无线控制模式与 RX 输出电流上限（bpp drawload / epp_plus/QC）
+        self.last_wls_mode = "unknown"
+        self.last_rx_iout_limit: int | None = None
 
     def start(self) -> None:
         threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
@@ -1174,7 +1215,13 @@ class Sampler:
                 self.last_cp_mode = None
                 self.last_cp_work_mode = None
                 self.last_cur_decision = None
+                self.last_wls_mode = "unknown"
+                self.last_rx_iout_limit = None
             else:
+                wm = parse_wireless_mode(
+                    split_after_last_wireless_attach(session_log))
+                self.last_wls_mode = wm["mode"]
+                self.last_rx_iout_limit = wm["rx_iout_limit"]
                 icl = parse_wls_icl(session_log, self.adb.utc_offset_minutes)
                 if icl is not None:
                     value, log_time = icl
@@ -1306,6 +1353,10 @@ class Sampler:
                 buck["cp_ratio"] = self.last_cp_work_mode
             if self.last_cur_decision is not None:
                 buck["cur_max_decision"] = copy.deepcopy(self.last_cur_decision)
+            # 无线控制模式：BPP drawload 同域可比较；EPP+/QC 不同域不可比较
+            buck["wls_mode"] = self.last_wls_mode
+            if self.last_rx_iout_limit is not None:
+                buck["rx_iout_limit"] = self.last_rx_iout_limit
         # 有线 CP 三态：cp / buck / unknown（时间顺序 + CP 证据优先）
         wstate = self.last_wired_state
         core.setdefault("derived", {})["wired_cp"] = {
