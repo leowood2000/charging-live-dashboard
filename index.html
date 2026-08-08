@@ -833,19 +833,21 @@ function renderVoters(d) {
     const iclCur = buck.icl !== null && buck.icl !== undefined
       && (!workMs || (buck.icl_ms || 0) >= workMs);
     if (mcaEff) {
-      summary.push(`<span class="chip" title="wireless_buck_input MCA 仲裁结果（本会话持续状态，不受 work_mode 失效）">` +
+      summary.push(`<span class="chip" title="wireless_buck_input MCA votable 逻辑仲裁结果（effective 赢家为准；EPP+/QC 下属策略控制域，不等同 RX 物理输入电流上限）">` +
         `无线输入仲裁<b>${fmt(mcaEff.value, 0)}</b><small>${esc(mcaEff.client)}</small></span>`);
     } else {
       summary.push(`<span class="chip" title="未捕获 wireless_buck_input effective，不以执行 ICL 反推仲裁">` +
         `无线输入仲裁<b>--</b><small>未捕获</small></span>`);
     }
     if (iclCur) {
+      const isEpp = buck.wls_mode === "epp_qc";
       const rel = buck.chg_en === 0 ? "充电暂停"
+        : isEpp ? "EPP+/QC 控制量 · 与 RX iout 不同域"
         : (mcaEff && mcaEff.value === buck.icl) ? "一致"
         : (mcaEff && mcaEff.value > buck.icl) ? "下游进一步限制"
         : (mcaEff && mcaEff.value < buck.icl) ? "执行高于仲裁" : "执行层下发";
-      summary.push(`<span class="chip" title="wireless loop 实际下发 ICL（执行层控制值，非仲裁结果）">` +
-        `执行 ICL<b>${fmt(buck.icl, 0)}</b><small>${rel}</small></span>`);
+      summary.push(`<span class="chip" title="${isEpp ? "wireless loop 策略 ICL 控制量（EPP+/QC 控制域，非 RX 物理输入上限）" : "wireless loop 实际下发 ICL（执行层控制值，非仲裁结果）"}">` +
+        `${isEpp ? "策略 ICL" : "执行 ICL"}<b>${fmt(buck.icl, 0)}</b><small>${rel}</small></span>`);
     }
   }
   if (chargingNow) {
@@ -1056,10 +1058,12 @@ function renderVoters(d) {
         modeText += `<span class="vote-result" style="color:var(--amber)">状态 <b>疑似未生效</b><small>BPP 同域电流持续超过 ICL</small></span>`;
       } else if (b.chg_en === 0) {
         modeText += `<span class="vote-result">状态 <b>已生效 · 当前充电暂停</b><small>chg_en=0，限流非当前瓶颈</small></span>`;
-      } else if (iclVal !== null && effVal !== null && !iclOld) {
+      } else if (wm === "bpp_drawload" && iclVal !== null && effVal !== null && !iclOld) {
         const delta = iclVal - effVal;
         const eq = delta === 0;
         modeText += `<span class="vote-result"${delta < 0 ? ' style="color:var(--amber)"' : ""}>状态 <b>${eq ? "仲裁与执行一致" : delta < 0 ? "执行值低于仲裁值" : "执行值高于仲裁值"}</b><small>仲裁 ${effVal}mA / 执行 ICL ${iclVal}mA${delta < 0 ? " · 下游另有约束" : ""}</small></span>`;
+      } else if (iclVal !== null && effVal !== null && !iclOld) {
+        modeText += `<span class="vote-result">状态 <b>已生效（仲裁）</b><small>${wm === "epp_qc" ? "EPP+/QC 控制域，不做数值比较" : "当前模式不做数值比较"}</small></span>`;
       } else if (effVal !== null) {
         modeText += `<span class="vote-result">状态 <b>已生效（仲裁）</b><small>当前路径 ICL 待捕获</small></span>`;
       } else if (iclVal !== null) {
