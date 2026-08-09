@@ -133,7 +133,7 @@
   .tile .k small { display: block; margin-top: 2px; }
   .tile .v {
     font-size: 15px; font-weight: 600; word-break: break-all;
-    font-variant-numeric: tabular-nums; line-height: 1.4;
+    font-variant-numeric: tabular-nums; line-height: 1.4; white-space: pre-line;
   }
   .tile .v small { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 3px; }
   .tile .v .empty { color: var(--muted); font-weight: 400; }
@@ -495,7 +495,17 @@ function renderNodeBody(node) {
       const on = node.value === "1";
       body = `<span class="${on ? "" : "bad"}">${on ? "已建立（EPP 协商成功）" : "未建立（仅 BPP）"}</span>`;
     } else if (node.fmt === "ichg") {
-      body = `<span>${esc(node.value)}</span>`;
+      // sysfs 原文形如 "buck eff_client:xxx 3400\nwl_buck eff_client:xxx 3400"，
+      // 逐行解析成 chips，避免多行原文被折叠成一团
+      const ichgLines = String(node.value).split("\n").map(s => s.trim()).filter(Boolean);
+      const ichgChips = ichgLines.map(line => {
+        const m = line.match(/^(\S+)\s+eff_client:(\S+)\s+(-?\d+)/);
+        if (!m) return `<span class="chip" title="${esc(line)}">${esc(line)}</span>`;
+        return `<span class="chip" title="驱动 raw：${esc(line)}">${esc(m[1])}<b>${m[3]}</b><small>mA · ${esc(m[2])}</small></span>`;
+      });
+      body = ichgChips.length
+        ? `<div class="chips">${ichgChips.join("")}</div>`
+        : `<span>${esc(node.value)}</span>`;
     } else if (node.fmt === "ua_to_ma") {
       const n = Number(node.value);
       body = Number.isFinite(n)
