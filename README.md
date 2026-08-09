@@ -19,7 +19,7 @@
 - `wireless_buck_input` 固定放在详情卡：MCA 仲裁（effective 赢家）+ ADSP 无线 ICL（prop 0x1003）+ `xm_wls` 能力票 + 说明（已下发 ADSP，闭源固件如何应用不可见，不等同 RX 输出电流上限）
 - 不再用 `wls_icl` 与 `iout` 做“限流未生效”判定（BPP/EPP+/QC 均不比较）：反编译证据链为 `effective → strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)`，落地权在闭源 ADSP 固件
 - `rx_iout_limit` 随无线会话保持：`power_good_on` 捕获、会话内持续有效，`work_mode`（1:1/2:1/4:1）切换与日志窗口滚动不失效，`power_good_off` 清空；会话日志读取失败时保留值并标 stale
-- 无线电池侧上限按当前功率路径选择：CP 生效 → quick wireless `cur_max:[Final]`（算法决策，带年龄/历史值标注）+ 无线热控上限（取 `wireless_sw_thermal_ich` effective，类别由 `wireless_thermal_(20/30/50/80)w` 标识）；Buck 生效 → `buck_charge_curr` effective + 无线热控上限取 `wireless_thermal_XXw`；多票显示待确认、不做 max 猜测；路径未确认 → 显示“待确认”，不用 Buck FCC 冒充当前上限；`buck_charge_curr` 在 CP 下标注“Buck 路径 FCC”
+- 无线电池侧上限按当前功率路径选择：CP 生效 → 总览只显示 quick wireless `cur_max:[Final]`（算法决策，带年龄/历史值标注），不单独展示“无线热控上限”（`wireless_sw_thermal_ich` effective 与本轮 `sw_thermal_ichg` 不等价，热控输入在 Quick Wireless 决策卡内看）；Buck 生效 → `buck_charge_curr` effective + 无线热控上限取 `wireless_thermal_XXw`；多票显示待确认、不做 max 猜测；路径未确认 → 显示“待确认”，不用 Buck FCC 冒充当前上限；`buck_charge_curr` 在 CP 下标注“Buck 路径 FCC”
 - 新增只读卡“Quick Wireless 电池电流决策”：展示 select_max_ibat 的五个输入（channel_cur / temp_max_cur / tx_adapter_max / sw_qc_ichg / sw_thermal_ichg，标注当前瓶颈）、`cur_max:[Final]` 与实际 ibat，明确标注“算法聚合 · 非 MCA votable”
 - CP 状态按会话解析：遇到 `power_good_on/off` 重置，只保留当前会话内的 sc8581 模式/分压比/cur_max，避免上一会话残留冒充当前值
 - 功率路径三态显示：cp（本会话 work_mode=1/2/4 或 operation mode>0，附分压比）/ buck（本会话明确 operation mode=0）/ 待确认（本会话尚无路径证据）

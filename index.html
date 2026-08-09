@@ -951,26 +951,9 @@ function renderVoters(d) {
         } else {
           summary.push(`<span class="chip" title="CP 路径生效但尚未捕获 cur_max:[Final]">当前电池充电电流上限<b>--</b><small>Quick Wireless Final 待捕获</small></span>`);
         }
-        // 无线热控上限（CP）：热控值取 wireless_sw_thermal_ich effective
-        // （→ sw_thermal_ichg → select_max_ibat → cur_max:[Final]）；
-        // wireless_thermal_XXw 仅用于标识充电器类别。
-        const wThermalRows = (topics.buck_charge_curr && topics.buck_charge_curr.rows || [])
-          .filter(r => /^wireless_thermal_(20|30|50|80)w$/.test(r.client) && r.enable === 1 && r.value > 0);
-        let wCatLabel = null;
-        if (wThermalRows.length === 1) {
-          const wCat = (wThermalRows[0].client.match(/wireless_thermal_(\d+)w/) || [])[1];
-          wCatLabel = wCat && W_THERMAL_LABELS[wCat] ? W_THERMAL_LABELS[wCat] : null;
-        }
-        const wswEff = effectiveOf(topics.wireless_sw_thermal_ich);
-        if (wswEff) {
-          const catTip = wCatLabel
-            ? " · 类别由 " + esc(wThermalRows[0].client) + " voter 标识"
-            : (wThermalRows.length > 1 ? " · 类别多票待确认" : "");
-          summary.push(`<span class="chip" title="CP 路径热控输入：wireless_sw_thermal_ich effective → sw_thermal_ichg → cur_max:[Final]${catTip}">` +
-            `无线热控上限<b>${fmt(wswEff.value, 0)}</b><small>wireless_sw_thermal_ich${wCatLabel ? " · " + wCatLabel : ""}</small></span>`);
-        } else {
-          summary.push(`<span class="chip" title="CP 路径热控输入 wireless_sw_thermal_ich 未捕获">无线热控上限<b>--</b><small>wireless_sw_thermal_ich 待确认</small></span>`);
-        }
+        // CP 总仲裁不单独展示“无线热控上限”：wireless_sw_thermal_ich effective
+        // 与本轮 sw_thermal_ichg 不等价（已有真机证据），热控输入在
+        // “Quick Wireless 电池电流决策”卡内看 sw_thermal_ichg。
       } else if (wCpState === "buck") {
         addSummary("当前电池充电电流上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
         // 无线热控上限（Buck）：直接取 buck_charge_curr 中唯一启用的 wireless_thermal_XXw
