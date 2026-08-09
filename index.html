@@ -819,7 +819,11 @@ function renderVoters(d) {
     const connLabel = wiredCharging ? "有线" : wirelessCharging ? "无线" : "未知";
     const rtRaw = realTypeNode && realTypeNode.value ? String(realTypeNode.value) : "";
     const rtShow = rtRaw && !/^(unknown|未连接（放电中）|未识别（充电中）)$/i.test(rtRaw) ? rtRaw : "";
-    summary.push(`<span class="chip" title="battery 状态与 real_type">连接类型<b>${esc(connLabel)}</b>${rtShow ? `<small>${esc(rtShow)}</small>` : ""}</span>`);
+    // 连接类型属协议/连接状态：无线页面本身已明确，总仲裁不再展示；
+    // 有线场景保留 real_type 便于区分协议
+    if (!wirelessActive) {
+      summary.push(`<span class="chip" title="battery 状态与 real_type">连接类型<b>${esc(connLabel)}</b>${rtShow ? `<small>${esc(rtShow)}</small>` : ""}</span>`);
+    }
     const battMa = d.derived && d.derived.batt_current_ma;
     // 充电生效三态：正常充电 / 停止过渡（OFF 但实测仍有电流）/ 已停止（OFF 且电流≈0）
     const ceEff = effectiveOf(topics.chg_enable);
@@ -915,12 +919,11 @@ function renderVoters(d) {
       }
     } else if (wirelessActive) {
       // 无线协议控制域（前级）与后级 Buck/CP 路径是独立维度：
-      // 总仲裁只展示当前功率链上可物理解释的限制：
-      // rx_iout_limit（RX 输出电流上限，允许上限）+ 实测 iout；
-      // wireless_buck_input / wls_icl / xm_wls / wireless_qc 不进总仲裁（详情卡保留）
+      // 总仲裁只放“真正参与当前充电控制/最终限制的结果”：
       // 上游无线平台输入 ICL：wireless_buck_input effective → ADSP 0x1003；
       // EPP+/QC 下与 RX iout 的映射未闭环，不直接比较；
-      // soc_limit 为 effective winner + SmartEndura 上下文 + ibat≈0 时标记“当前上游限制”。
+      // soc_limit 为 effective winner + SmartEndura 上下文 + ibat≈0 时标记“当前上游限制”；
+      // RX 输出上限 / 实测 RX 输出 / 控制模式 / 连接类型移入详情卡（链路能力/遥测信息）。
       const wbiEff = effectiveOf(buck);
       if (wbiEff) {
         const smartStop = wbiEff.client === "soc_limit"
@@ -930,20 +933,6 @@ function renderVoters(d) {
           `无线平台输入 ICL<b>${fmt(wbiEff.value, 0)}</b><small>${esc(wbiEff.client)} · ADSP 0x1003${smartStop ? " · 当前上游限制" : " · 上游策略"}</small></span>`);
       } else {
         summary.push(`<span class="chip" title="wireless_buck_input effective 未捕获">无线平台输入 ICL<b>--</b><small>待捕获</small></span>`);
-      }
-      if (wlsMode === "epp_qc") {
-        summary.push(`<span class="chip" title="RX/TX 功率协商控制（EPP+/QC），与后级 Buck/CP 路径独立">当前无线模式<b>EPP+/QC</b></span>`);
-      } else if (wlsMode === "bpp_drawload") {
-        summary.push(`<span class="chip" title="BPP drawload 控制环（仅模式标识，不据此做 ICL/iout 一致性判定）">当前无线模式<b>BPP · drawload</b></span>`);
-      }
-      const rxLimit = buck && buck.rx_iout_limit !== null && buck.rx_iout_limit !== undefined
-        ? buck.rx_iout_limit : null;
-      const rxOk = rxLimit !== null && !!buck && buck.rx_iout_limit_captured;
-      const rxStale = buck && buck.rx_iout_limit_stale;
-      summary.push(`<span class="chip" title="strategy_class_wireless_op_get_rx_iout_limit 按充电器类型/模式查表得到的 RX 输出电流上限；允许上限而非当前瓶颈；随无线会话有效，work_mode 切换不失效${rxStale ? " · 会话日志读取异常，显示上次成功值" : ""}">` +
-        `RX 输出电流上限<b>${rxOk ? fmt(rxLimit, 0) + "mA" : "--"}</b><small>${rxOk ? "允许上限" : rxStale ? "待确认 · 数据陈旧" : "待确认"}</small></span>`);
-      if (ioutNow !== null) {
-        summary.push(`<span class="chip" title="wls_debug 实时 RX 输出电流（遥测值）">实际 RX 输出<b>${fmt(ioutNow, 0)}</b><small>mA · 实时</small></span>`);
       }
       // 无线路径：电池侧 ceiling 按当前功率路径选择——
       // CP 生效 → quick wireless cur_max:[Final]（算法决策，允许上限，带年龄）
@@ -1072,13 +1061,13 @@ function renderVoters(d) {
       if (b.chg_en === 0) {
         modeText += `<span class="vote-result">chg_en <b>0</b><small>当前充电暂停，ICL 非当前瓶颈</small></span>`;
       }
-      modeText += `<span class="vote-result" title="反汇编证据：strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)">说明 <b>无线平台输入 ICL（上游）</b><small>ADSP prop 0x1003 · 闭源固件如何应用不可见，不等同 RX 输出电流上限</small></span>`;
+      modeText += `<span class="vote-result" title="反汇编证据：strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)">说明 <b>无线平台输入 ICL（上游）</b><small>ADSP prop 0x1003 · EPP+/QC 下与 RX iout 不同控制域，不做数值一致性比较</small></span>`;
       const xmWls = (b.rows || []).find(r => r.client === "xm_wls");
       if (xmWls && xmWls.enable === 1) {
         modeText += `<span class="vote-result" title="xm_wls 是无线能力/适配器允许的最大输入电流票，不是当前仲裁 winner">无线能力票 xm_wls <b>${xmWls.value}</b><small>mA</small></span>`;
       }
       if (b.rx_iout_limit !== null && b.rx_iout_limit !== undefined && b.rx_iout_limit_captured) {
-        modeText += `<span class="vote-result" title="strategy_class_wireless_op_get_rx_iout_limit 输出（驱动策略层上限，未确认对应芯片寄存器）">RX 输出电流上限 <b>${fmt(b.rx_iout_limit, 0)}</b><small>mA · driver</small></span>`;
+        modeText += `<span class="vote-result" title="strategy_class_wireless_op_get_rx_iout_limit 输出（驱动策略层允许上限，未确认对应芯片寄存器）">RX 输出允许上限 <b>${fmt(b.rx_iout_limit, 0)}</b><small>mA · driver</small></span>`;
       }
     }
     let buckPathNote = "";

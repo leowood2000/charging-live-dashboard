@@ -7,7 +7,7 @@
 - **双周期采集**：快速采集 3 秒（sysfs 节点、battery uevent、thermal.dump、历史曲线），日志采集 10 秒（投票表、会话、EPP、实际下发 ICL），避免每 3 秒重扫几 MB 日志
 - **电流符号统一**：充电为正、放电为负，`Not charging` 也按放电处理；电池功率保留正负号；原始 JSON 仍保留内核原值方便排查
 - **MCA 仲裁移植**：支持 `voting on/off`、完整 client 字符集、单位白名单（未知主题不默认 mA）、`VOTE_POLICIES`（大部分来自 .ko 反汇编核实；`buck_charge_curr` 为项目假设 `MIN_ASSUMED`，仅详情卡“参考推算”）、按主题缓存 `changed`/`result`
-- **总仲裁只显示实际结果**：无线输入侧只展示 **RX 输出电流上限**（`rx_iout_limit`，允许上限）与 **实际 RX 输出电流**（wls_debug iout）；`wireless_buck_input` / `wls_icl` / `xm_wls` / `wireless_qc` 不进总仲裁（详情卡保留）
+- **总仲裁只放当前充电控制/最终限制结果**：无线侧 = 无线平台输入 ICL（`wireless_buck_input` effective → ADSP 0x1003，上游策略）+ 当前电池充电电流上限（按功率路径取 `cur_max:[Final]` 或 `buck_charge_curr`）；RX 输出上限、实测 RX 输出、控制模式、连接类型移入详情卡（链路能力/遥测信息）
 - **投票区只显示生效主题**：有启用票或驱动已给出实际结果的主题才显示卡片
 - `wireless_auth_*`（20w/30w/50w/80w/voice_box/magnet）与 `wireless_bpp/bppqc2/bppqc3/epp_in` 是按充电板型号/协议模式预置的热控表，无论连接哪台垫都会被整批投票，已直接隐藏
 - `term_volt` / `term_curr`（JEITA 终止电压/电流）合并为一张“JEITA 终止参数”卡并标注**静态常数**（由温度档决定，会话内基本不变）
@@ -16,7 +16,7 @@
 - 无线功率路径判定：quick wireless `work_mode=1/2/4` 是 CP 硬证据（本会话捕获后持续持有，窗口滚动不失效），`operation mode>0` 作交叉验证、`operation mode=0` 明确切 Buck（并清旧 work_mode），均无 → 待确认；首页显示“当前功率路径”（电荷泵 · 1:1/2:1/4:1 / Buck 直充）
 - “当前功率路径”chip 附带电荷泵转换比（由 quick wireless work_mode 映射：1:1 bypass / 2:1 div2 / 4:1 div4）
 - 未充电（battery STATUS ≠ Charging）时隐藏全部投票/仲裁卡片，仅保留生效场景、虚拟温度、电池温度与 JEITA 静态参数
-- `wireless_buck_input` 固定放在详情卡：MCA 仲裁（effective 赢家）+ ADSP 无线 ICL（prop 0x1003）+ `xm_wls` 能力票 + 说明（已下发 ADSP，闭源固件如何应用不可见，不等同 RX 输出电流上限）
+- `wireless_buck_input` 提升为总仲裁上游层“无线平台输入 ICL”（effective → ADSP 0x1003，上游策略，非 Buck 专属）；详情卡保留 MCA 仲裁、控制模式、RX 输出允许上限、实际 RX 输出、`xm_wls` 能力票与说明
 - 不再用 `wls_icl` 与 `iout` 做“限流未生效”判定（BPP/EPP+/QC 均不比较）：反编译证据链为 `effective → strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)`，落地权在闭源 ADSP 固件
 - `rx_iout_limit` 随无线会话保持：`power_good_on` 捕获、会话内持续有效，`work_mode`（1:1/2:1/4:1）切换与日志窗口滚动不失效，`power_good_off` 清空；会话日志读取失败时保留值并标 stale
 - 无线平台输入 ICL：总仲裁上游层取 `wireless_buck_input` effective（ADSP prop 0x1003，上游策略，非 Buck 专属）；EPP+/QC 下与 RX iout 映射未闭环、不做数值比较；`soc_limit` 为 effective winner + SmartEndura 上下文 + ibat≈0 时标“当前上游限制”
@@ -31,7 +31,7 @@
 - stale 独立：`logs_stale` 只代表 vote/session 主链路，`power_path_logs_stale` 单独输出；功率路径读取失败时保留上次成功状态
 - 无线/有线 SC8581 状态彻底解耦：`power_good` 只重置无线 track，`usb online` / `real_type changed` 只重置有线 track；SC8581 operation mode 仅在对应 quickchg 上下文出现后写入对应 track
 - 有线 Buck 确认：当前有线会话出现 `mca_strategy_buckchg / strategy_buckchg` 活动且无 CP 证据时，路径判为“Buck 直充（有线）”；有线状态按时间顺序 + CP 证据优先（mode>0 / mode=0 后 cur_work_cp → CP，mode=0 或 buckchg → Buck，均无 → 待确认）
-- **仲裁展示分离**：`effective vote is now`（MCA 逻辑仲裁）与 `wls_icl`（ADSP GLINK prop 0x1003 下发值）在详情卡独立展示；`rx_iout_limit`（RX 输出电流上限）与 `wls_debug iout`（实时输出电流）在总仲裁展示，两组互不覆盖
+- **仲裁展示分离**：总仲裁 = 无线平台输入 ICL（上游）+ 电池侧最终上限（按路径）；`rx_iout_limit`（RX 输出允许上限）与 `wls_debug iout`（实测 RX 输出）收进无线平台输入 ICL 详情卡，与上游策略 ICL 分层展示、互不覆盖
 - **会话档案**：以 `power_good_on` 建立会话，`power_good_off` 记入“充电板移除”事件；保留全部电流变化与 open path 事件；最多 3 个会话、每个会话最多 100 条事件
 - **日志容错**：日志读取失败保留上次成功数据并标记 `logs_stale`；读取成功但 grep 无匹配不算失败
 - **ADB 自动重连**：每 5 秒节流重试 `adb connect` + `adb devices`，启动时未连接或中途掉线可自动恢复；指定 `--adb-host` 时优先使用该设备
@@ -50,7 +50,7 @@
 
 ![详情与曲线](docs/screenshot-detail.png)
 
-电流仲裁实时表（总仲裁无线侧 = RX 输出电流上限 + 实测 RX 输出；电池侧 = 电池充电电流上限；wireless_buck_input 详情卡保留 MCA 仲裁 / ADSP ICL / 能力票）：
+电流仲裁实时表（总仲裁 = 当前功率路径 + 无线平台输入 ICL + 当前电池充电电流上限 + 充电使能/快充禁用；RX 上限与实测 RX 输出在无线平台输入 ICL 详情卡）：
 
 ![电流仲裁实时表](docs/screenshot-arbitration.png)
 
@@ -120,7 +120,7 @@ python server.py --adb-host 192.168.33.118:5555 --port 8765 --interval 3 --logs-
 - `VOTE_UNITS`：只有已核实的电流主题才标注 `mA`，未知主题默认空单位
 - `VOTE_POLICIES`：大部分来自 miro 固件 .ko 反汇编核实（MIN / FIRST_NONZERO / FIRST_ZERO / UNKNOWN）；`buck_charge_curr` 为项目假设 `MIN_ASSUMED`，无 effective 行时只允许详情卡“参考推算”，不进入总仲裁 fallback
 - `changed`/`result` 按主题分别缓存，日志交错时不会串线；`voting off` 正确解析为 `enabled: false`
-- MCA `effective vote is now` 是逻辑仲裁结果；`wls_icl` 经 `mca_adsp_glink_write_prop(0x1003)` 下发 ADSP（闭源固件如何应用不可见）；`rx_iout_limit` 是 RX 输出电流上限（允许上限）；`wls_debug iout` 是实时测量值，四者互不覆盖
+- MCA `effective vote is now` 是逻辑仲裁结果；`wls_icl` 经 `mca_adsp_glink_write_prop(0x1003)` 下发 ADSP（上游无线平台输入 ICL，闭源固件如何应用不可见）；`rx_iout_limit` 是 RX 输出允许上限、`wls_debug iout` 是实时测量值，二者为链路能力/遥测信息，收在详情卡
 
 ### 会话
 
