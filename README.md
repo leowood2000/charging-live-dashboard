@@ -7,7 +7,7 @@
 - **双周期采集**：快速采集 3 秒（sysfs 节点、battery uevent、thermal.dump、历史曲线），日志采集 10 秒（投票表、会话、EPP、实际下发 ICL），避免每 3 秒重扫几 MB 日志
 - **电流符号统一**：充电为正、放电为负，`Not charging` 也按放电处理；电池功率保留正负号；原始 JSON 仍保留内核原值方便排查
 - **MCA 仲裁移植**：支持 `voting on/off`、完整 client 字符集、单位白名单（未知主题不默认 mA）、`VOTE_POLICIES`（大部分来自 .ko 反汇编核实；`buck_charge_curr` 为项目假设 `MIN_ASSUMED`，仅详情卡“参考推算”）、按主题缓存 `changed`/`result`
-- **总仲裁只显示实际结果**：无线输入限流在仲裁值未生效（icl 与 iout 违反物理功率比）时，chip 改为“实际约束限流”并显示电池侧真正约束电流的限流（quick_wireless `cur_max:[Final]` / `buck_fcc`），不再误标为无线输入电流；ICL / iout 细节保留在投票详情卡
+- **总仲裁只显示实际结果**：无线输入侧只展示 **RX 输出电流上限**（`rx_iout_limit`，允许上限）与 **实际 RX 输出电流**（wls_debug iout）；`wireless_buck_input` / `wls_icl` / `xm_wls` / `wireless_qc` 不进总仲裁（详情卡保留）
 - **投票区只显示生效主题**：有启用票或驱动已给出实际结果的主题才显示卡片
 - `wireless_auth_*`（20w/30w/50w/80w/voice_box/magnet）与 `wireless_bpp/bppqc2/bppqc3/epp_in` 是按充电板型号/协议模式预置的热控表，无论连接哪台垫都会被整批投票，已直接隐藏
 - `term_volt` / `term_curr`（JEITA 终止电压/电流）合并为一张“JEITA 终止参数”卡并标注**静态常数**（由温度档决定，会话内基本不变）
@@ -16,9 +16,10 @@
 - 功率路径判定只以 sc8581 电荷泵 work_mode 为准（不用电流大小猜测）：首页显示“当前功率路径”（电荷泵 / Buck 直充）
 - “当前功率路径”chip 附带电荷泵转换比（由 quick wireless work_mode 映射：1:1 bypass / 2:1 div2 / 4:1 div4）
 - 未充电（battery STATUS ≠ Charging）时隐藏全部投票/仲裁卡片，仅保留生效场景、虚拟温度、电池温度与 JEITA 静态参数
-- 电荷泵路径生效时，首页隐藏 `wireless_buck_input`，折叠到“仲裁详情 · 未生效”卡（保留名义仲裁与投票，标注退出 CP 后将使用该限流）
-- 总仲裁“无线输入限流”优先显示驱动实际下发的 `wireless loop: icl`（证据链 soc_limit → effective → icl），仅在实际输入电流明显违反时标注“未生效”
-- 电池侧显示“电池侧算法上限”（quick wireless 最近一次 `cur_max:[Final]`，带年龄，超 30s 标“历史值/待刷新”）与“最新限制候选”（如 wireless_sw_thermal_ich 新值，等待 quick wireless 收敛），不与输入侧 ICL 混淆
+- `wireless_buck_input` 固定放在详情卡：MCA 仲裁（effective 赢家）+ ADSP 无线 ICL（prop 0x1003）+ `xm_wls` 能力票 + 说明（已下发 ADSP，闭源固件如何应用不可见，不等同 RX 输出电流上限）
+- 不再用 `wls_icl` 与 `iout` 做“限流未生效”判定（BPP/EPP+/QC 均不比较）：反编译证据链为 `effective → strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)`，落地权在闭源 ADSP 固件
+- `rx_iout_limit` 随无线会话保持：`power_good_on` 捕获、会话内持续有效，`work_mode`（1:1/2:1/4:1）切换与日志窗口滚动不失效，`power_good_off` 清空；会话日志读取失败时保留值并标 stale
+- 电池侧显示 `buck_charge_curr` 的 MCA 仲裁结果（**电池充电电流上限**）；quick wireless `cur_max:[Final]` 保留在下方“Quick Wireless 电池电流决策”卡
 - 新增只读卡“Quick Wireless 电池电流决策”：展示 select_max_ibat 的五个输入（channel_cur / temp_max_cur / tx_adapter_max / sw_qc_ichg / sw_thermal_ichg，标注当前瓶颈）、`cur_max:[Final]` 与实际 ibat，明确标注“算法聚合 · 非 MCA votable”
 - CP 状态按会话解析：遇到 `power_good_on/off` 重置，只保留当前会话内的 sc8581 模式/分压比/cur_max，避免上一会话残留冒充当前值
 - 功率路径三态显示：cp（本会话 operation mode>0，附 2:1 等分压比）/ buck（本会话明确 mode=0）/ Buck / CP 未激活（待确认）（本会话尚无 SC8581 模式日志）
@@ -29,7 +30,7 @@
 - stale 独立：`logs_stale` 只代表 vote/session 主链路，`power_path_logs_stale` 单独输出；功率路径读取失败时保留上次成功状态
 - 无线/有线 SC8581 状态彻底解耦：`power_good` 只重置无线 track，`usb online` / `real_type changed` 只重置有线 track；SC8581 operation mode 仅在对应 quickchg 上下文出现后写入对应 track
 - 有线 Buck 确认：当前有线会话出现 `mca_strategy_buckchg / strategy_buckchg` 活动且无 CP 证据时，路径判为“Buck 直充（有线）”；有线状态按时间顺序 + CP 证据优先（mode>0 / mode=0 后 cur_work_cp → CP，mode=0 或 buckchg → Buck，均无 → 待确认）
-- **仲裁展示分离**：`effective vote is now`（MCA 逻辑仲裁）、`wireless loop icl`（驱动实际下发限流）、`wls_debug iout`（实时输出电流）三组独立展示，ICL 与 iout 偏差超过 200mA 时提示“可能为旧日志或不同控制阶段”
+- **仲裁展示分离**：`effective vote is now`（MCA 逻辑仲裁）与 `wls_icl`（ADSP GLINK prop 0x1003 下发值）在详情卡独立展示；`rx_iout_limit`（RX 输出电流上限）与 `wls_debug iout`（实时输出电流）在总仲裁展示，两组互不覆盖
 - **会话档案**：以 `power_good_on` 建立会话，`power_good_off` 记入“充电板移除”事件；保留全部电流变化与 open path 事件；最多 3 个会话、每个会话最多 100 条事件
 - **日志容错**：日志读取失败保留上次成功数据并标记 `logs_stale`；读取成功但 grep 无匹配不算失败
 - **ADB 自动重连**：每 5 秒节流重试 `adb connect` + `adb devices`，启动时未连接或中途掉线可自动恢复；指定 `--adb-host` 时优先使用该设备
@@ -47,7 +48,7 @@
 
 ![详情与曲线](docs/screenshot-detail.png)
 
-电流仲裁实时表（总仲裁只显示实际结果；仲裁值未生效时自动改用真正约束电流的限流 quick_wireless cur_max / buck_fcc，ICL / iout 细节在投票卡内）：
+电流仲裁实时表（总仲裁无线侧 = RX 输出电流上限 + 实测 RX 输出；电池侧 = 电池充电电流上限；wireless_buck_input 详情卡保留 MCA 仲裁 / ADSP ICL / 能力票）：
 
 ![电流仲裁实时表](docs/screenshot-arbitration.png)
 
@@ -117,7 +118,7 @@ python server.py --adb-host 192.168.33.118:5555 --port 8765 --interval 3 --logs-
 - `VOTE_UNITS`：只有已核实的电流主题才标注 `mA`，未知主题默认空单位
 - `VOTE_POLICIES`：大部分来自 miro 固件 .ko 反汇编核实（MIN / FIRST_NONZERO / FIRST_ZERO / UNKNOWN）；`buck_charge_curr` 为项目假设 `MIN_ASSUMED`，无 effective 行时只允许详情卡“参考推算”，不进入总仲裁 fallback
 - `changed`/`result` 按主题分别缓存，日志交错时不会串线；`voting off` 正确解析为 `enabled: false`
-- MCA `effective vote is now` 是逻辑仲裁结果；`wireless loop icl` 是实际下发值；`wls_debug iout` 是实时测量值，三者互不覆盖
+- MCA `effective vote is now` 是逻辑仲裁结果；`wls_icl` 经 `mca_adsp_glink_write_prop(0x1003)` 下发 ADSP（闭源固件如何应用不可见）；`rx_iout_limit` 是 RX 输出电流上限（允许上限）；`wls_debug iout` 是实时测量值，四者互不覆盖
 
 ### 会话
 
