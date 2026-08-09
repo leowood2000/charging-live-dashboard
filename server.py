@@ -1446,10 +1446,18 @@ class Sampler:
             if pp_off:
                 pass  # 上面已清空
             elif pp_new_session:
-                self.last_cp_mode = w_cp_mode
-                self.last_cp_work_mode = w_cp_work_mode
-                self.last_wls_work_mode_ms = w_cp_work_mode_ms
-                self.last_cur_decision = w_decision
+                if w_cp_mode is not None:
+                    self.last_cp_mode = w_cp_mode
+                    if w_cp_mode == 0:
+                        # 明确切到 Buck：清掉旧 work_mode，避免页面永远保持 CP
+                        self.last_cp_work_mode = None
+                        self.last_wls_work_mode_ms = None
+                if w_cp_work_mode is not None:
+                    self.last_cp_work_mode = w_cp_work_mode
+                    if w_cp_work_mode_ms is not None:
+                        self.last_wls_work_mode_ms = w_cp_work_mode_ms
+                if w_decision is not None:
+                    self.last_cur_decision = w_decision
                 self.last_cur_decision_key = None
             elif w_boundary and pg_ms_pp != self.last_wls_session_ms:
                 # pp 窗口里的边界与已确认会话不一致：不采纳本轮 CP/Final
@@ -1457,6 +1465,10 @@ class Sampler:
             else:
                 if w_cp_mode is not None:
                     self.last_cp_mode = w_cp_mode
+                    if w_cp_mode == 0:
+                        # 明确切到 Buck：清掉旧 work_mode，避免页面永远保持 CP
+                        self.last_cp_work_mode = None
+                        self.last_wls_work_mode_ms = None
                 if w_cp_work_mode is not None:
                     self.last_cp_work_mode = w_cp_work_mode
                     if w_cp_work_mode_ms is not None:
@@ -1565,15 +1577,24 @@ class Sampler:
                 buck["actual_limit_source"] = (
                     "quick_wireless cur_max" if self.last_quick_cur_max is not None
                     else "wireless loop buck_fcc")
-            cp_mode = self.last_cp_mode
-            # 三态：cp（本会话 operation mode>0）/ buck（本会话明确 mode=0）/ unknown（无新日志待确认）
-            if cp_mode is not None:
-                buck["cp_state"] = "cp" if cp_mode > 0 else "buck"
+            # 无线路径判定（当前 power_good 会话缓存）：
+            # 1) quick wireless work_mode=1/2/4 → CP 硬证据（无需 operation mode）
+            # 2) operation mode>0 → CP；operation mode=0 → Buck（并清掉旧 work_mode）
+            # 3) 均无 → unknown
+            wm = self.last_cp_work_mode
+            if wm in (1, 2, 4):
+                buck["cp_state"] = "cp"
+                buck["cp_ratio"] = wm
+                buck["cp_active"] = True
+            elif self.last_cp_mode is not None:
+                cp_active = self.last_cp_mode > 0
+                buck["cp_state"] = "cp" if cp_active else "buck"
+                buck["cp_active"] = cp_active
+                if cp_active and wm is not None:
+                    buck["cp_ratio"] = wm
             else:
                 buck["cp_state"] = "unknown"
-            buck["cp_active"] = bool(cp_mode and cp_mode > 0)
-            if cp_mode is not None and cp_mode > 0 and self.last_cp_work_mode is not None:
-                buck["cp_ratio"] = self.last_cp_work_mode
+                buck["cp_active"] = False
             if self.last_wls_work_mode_ms is not None:
                 buck["wls_work_mode_ms"] = self.last_wls_work_mode_ms
             if self.last_cur_decision is not None:

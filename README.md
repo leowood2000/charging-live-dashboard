@@ -13,7 +13,7 @@
 - `term_volt` / `term_curr`（JEITA 终止电压/电流）合并为一张“JEITA 终止参数”卡并标注**静态常数**（由温度档决定，会话内基本不变）
 - 有线/无线快充禁用卡按当前连接动态显示
 - 仲裁结果带**有效性校验**：主题全部撤票（如拔掉充电）后，旧 `effective vote is now` 不再展示，卡片按“生效主题”隐藏
-- 功率路径判定只以 sc8581 电荷泵 work_mode 为准（不用电流大小猜测）：首页显示“当前功率路径”（电荷泵 / Buck 直充）
+- 无线功率路径判定：quick wireless `work_mode=1/2/4` 是 CP 硬证据（本会话捕获后持续持有，窗口滚动不失效），`operation mode>0` 作交叉验证、`operation mode=0` 明确切 Buck（并清旧 work_mode），均无 → 待确认；首页显示“当前功率路径”（电荷泵 · 1:1/2:1/4:1 / Buck 直充）
 - “当前功率路径”chip 附带电荷泵转换比（由 quick wireless work_mode 映射：1:1 bypass / 2:1 div2 / 4:1 div4）
 - 未充电（battery STATUS ≠ Charging）时隐藏全部投票/仲裁卡片，仅保留生效场景、虚拟温度、电池温度与 JEITA 静态参数
 - `wireless_buck_input` 固定放在详情卡：MCA 仲裁（effective 赢家）+ ADSP 无线 ICL（prop 0x1003）+ `xm_wls` 能力票 + 说明（已下发 ADSP，闭源固件如何应用不可见，不等同 RX 输出电流上限）
@@ -22,7 +22,7 @@
 - 无线电池侧上限按当前功率路径选择：CP 生效 → quick wireless `cur_max:[Final]`（算法决策，带年龄/历史值标注）+ 无线热控上限（取 `wireless_sw_thermal_ich` effective，类别由 `wireless_thermal_(20/30/50/80)w` 标识）；Buck 生效 → `buck_charge_curr` effective + 无线热控上限取 `wireless_thermal_XXw`；多票显示待确认、不做 max 猜测；路径未确认 → 显示“待确认”，不用 Buck FCC 冒充当前上限；`buck_charge_curr` 在 CP 下标注“Buck 路径 FCC”
 - 新增只读卡“Quick Wireless 电池电流决策”：展示 select_max_ibat 的五个输入（channel_cur / temp_max_cur / tx_adapter_max / sw_qc_ichg / sw_thermal_ichg，标注当前瓶颈）、`cur_max:[Final]` 与实际 ibat，明确标注“算法聚合 · 非 MCA votable”
 - CP 状态按会话解析：遇到 `power_good_on/off` 重置，只保留当前会话内的 sc8581 模式/分压比/cur_max，避免上一会话残留冒充当前值
-- 功率路径三态显示：cp（本会话 operation mode>0，附 2:1 等分压比）/ buck（本会话明确 mode=0）/ Buck / CP 未激活（待确认）（本会话尚无 SC8581 模式日志）
+- 功率路径三态显示：cp（本会话 work_mode=1/2/4 或 operation mode>0，附分压比）/ buck（本会话明确 operation mode=0）/ 待确认（本会话尚无路径证据）
 - 有线功率路径正式接入：会话边界（`usb online` / `real_type changed` / `power_good`）内按时间顺序取最后一次 `sc8581 operation mode` 判定 cp/buck；`quickchg work_mode` 与 `map_ibus_to_fsw ratio` 提供分压比；`cur_work_cp` 作交叉证据；输出 `derived.wired_cp`
 - 有线 CP 激活时只显示对应比例的 div 卡（4:1 → div4_single/div4_multi）+ single/multi_chg_cur + thermal_flip；Buck/未知时隐藏全部 div，保留 buck_input / buck_charge_curr / chg_enable / quick_chg_disable / input_voltage / smartchg_delta_ichg / JEITA；`buck_5v/9v_*` 档位表与 `wireless_*` 始终隐藏
 - 日志抓取白名单补齐有线 quickchg 信号（`update_work_mode_para` / `map_ibus_to_fsw` / `mca_quick_charge_select_max_ibat` / `select_cur_work_mode`）与有线会话边界（`usb online` / `real_type changed`）
