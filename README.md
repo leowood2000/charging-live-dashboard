@@ -35,7 +35,8 @@
 - **日志容错**：日志读取失败保留上次成功数据并标记 `logs_stale`；读取成功但 grep 无匹配不算失败
 - **ADB 自动重连**：每 5 秒节流重试 `adb connect` + `adb devices`，启动时未连接或中途掉线可自动恢复；指定 `--adb-host` 时优先使用该设备
 - **断开清理**：无线断开（最后的电源事件为 `power_good_off`）时清除旧 ICL 与 EPP，避免上一会话残留
-- **桌面端固定栅格**：1320px 居中，KPI 三列、实时数据两列、电池标准属性整行四列、曲线两列、总仲裁整行、会话单列；900px/560px 以下自动切换移动布局
+- **主界面精简**：删除“芯片与系统 / 电荷泵与电池 / 电流投票与限流 / 电池标准属性”四张卡；对应 sysfs 节点与 battery uevent 仍完整保留在 `/api/data` 与原始 JSON
+- **桌面端固定栅格**：1320px 居中，KPI 三列、实时数据两列、曲线两列、总仲裁整行、会话单列；900px/560px 以下自动切换移动布局
 - **meta schema_version=2**：`fast_interval`、`logs_interval`、`logs_updated_at`、`logs_stale`、`source`、`device` 等字段供页面双倒计时与刷新使用
 
 ## 界面预览
@@ -44,7 +45,7 @@
 
 ![桌面端总览](docs/screenshot-desktop.png)
 
-电池标准属性（整行四列）、实时曲线与总仲裁结果：
+实时曲线与总仲裁结果：
 
 ![详情与曲线](docs/screenshot-detail.png)
 
