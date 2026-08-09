@@ -964,9 +964,6 @@ function renderVoters(d) {
         } else {
           summary.push(`<span class="chip" title="当前没有启用且非零的 wireless_thermal_(20/30/50/80)w 票">无线热控上限<b>--</b><small>无热控票</small></span>`);
         }
-        if (battMa !== null && battMa !== undefined) {
-          summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b>${fmt(Math.abs(battMa), 0)}</b><small>battery</small></span>`);
-        }
       } else if (wCpState === "buck") {
         addSummary("当前电池充电电流上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
       } else {
