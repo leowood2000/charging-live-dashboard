@@ -951,11 +951,14 @@ function renderVoters(d) {
         // 无线热控上限：识别当前有效功率档的 wireless_thermal_(20/30/50/80)w 票。
         // 恰好 1 个 → 显示该票；0 个 → 待确认；>1 个且无法确定功率档 → 多票待确认，
         // 不做 max/min 猜测（功率档识别后续可接 power_max / wireless_auth_* 票）。
+        // 20/30/50/80W 是充电器类别：驱动按检测到的类别启用对应 voter，enable 即类别选择。
+        const W_THERMAL_LABELS = { 20: "20W 类充电器", 30: "30W 类充电器", 50: "50W 类充电器", 80: "80W 类充电器" };
         const wThermalRows = (topics.buck_charge_curr && topics.buck_charge_curr.rows || [])
           .filter(r => /^wireless_thermal_(20|30|50|80)w$/.test(r.client) && r.enable === 1 && r.value > 0);
         if (wThermalRows.length === 1) {
           const wt = wThermalRows[0];
-          summary.push(`<span class="chip" title="buck_charge_curr 中当前唯一启用的无线热控票（热控允许值；CP 下不代表最终上限）">无线热控上限<b>${fmt(wt.value, 0)}</b><small>${esc(wt.client)}</small></span>`);
+          const wCat = (wt.client.match(/wireless_thermal_(\d+)w/) || [])[1];
+          summary.push(`<span class="chip" title="驱动按检测到的充电器类别启用的 wireless_thermal_${wCat}w 票（热控允许值；CP 下不代表最终上限）">无线热控上限<b>${fmt(wt.value, 0)}</b><small>${wCat && W_THERMAL_LABELS[wCat] ? W_THERMAL_LABELS[wCat] : esc(wt.client)}</small></span>`);
         } else if (wThermalRows.length > 1) {
           summary.push(`<span class="chip" title="多个 wireless_thermal_* 档同时启用且非零，当前功率档无法确认，不做 max 猜测">无线热控上限<b>--</b><small>多票待确认</small></span>`);
         } else {
