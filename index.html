@@ -222,6 +222,9 @@
     padding: 2px 9px;
     font-size: 12px;
   }
+  .vote-head .vote-result.result-line small {
+    display: block; margin-top: 2px;
+  }
   .vote-head .vote-result b { color: var(--text); }
   .vote-head .vote-result.calc {
     color: var(--amber);
@@ -928,13 +931,13 @@ function renderVoters(d) {
       const rxOk = rxLimit !== null && !!buck && buck.rx_iout_limit_captured;
       const rxStale = buck && buck.rx_iout_limit_stale;
       summary.push(`<span class="chip" title="strategy_class_wireless_op_get_rx_iout_limit 按充电器类型/模式查表得到的 RX 输出电流上限；允许上限而非当前瓶颈；随无线会话有效，work_mode 切换不失效${rxStale ? " · 会话日志读取异常，显示上次成功值" : ""}">` +
-        `RX 输出电流上限<b>${rxOk ? fmt(rxLimit, 0) : "--"}</b><small>${rxOk ? "允许上限" : rxStale ? "待确认 · 数据陈旧" : "待确认"}</small></span>`);
+        `RX 输出电流上限<b>${rxOk ? fmt(rxLimit, 0) + "mA" : "--"}</b><small>${rxOk ? "允许上限" : rxStale ? "待确认 · 数据陈旧" : "待确认"}</small></span>`);
       if (ioutNow !== null) {
         summary.push(`<span class="chip" title="wls_debug 实时 RX 输出电流（遥测值）">实际 RX 输出<b>${fmt(ioutNow, 0)}</b><small>mA · 实时</small></span>`);
       }
       // 无线路径：电池侧只显示 buck_charge_curr 的 MCA 仲裁结果（最终生效值）；
       // quick_wireless cur_max 不进总仲裁（保留在下方 Quick Wireless 电池电流决策卡）
-      addSummary("电池充电电流", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+      addSummary("电池充电电流上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
     }
     addSummary("充电使能", ceEff, v => (v === 1 ? "ON" : "OFF"));
     if (ceStopping) {
@@ -977,7 +980,7 @@ function renderVoters(d) {
       : "";
     let resultText = "";
     if (resultValid(b)) {
-      resultText = `<span class="vote-result" title="驱动 effective vote is now">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}` +
+      resultText = `<span class="vote-result result-line" title="驱动 effective vote is now">仲裁结果 <b>${esc(b.result.client)}</b> → ${b.result.value}${b.unit || ""}` +
         `${b.result.time ? `<small> · ${esc(b.result.time)}</small>` : ""}</span>`;
     } else if (t === "wireless_buck_input") {
       resultText = `<span class="vote-result" title="未捕获 mca_vote effective 行，不以执行层 ICL 反推仲裁">仲裁结果 <b>--</b><small>未捕获当前 effective</small></span>`;
@@ -1006,7 +1009,7 @@ function renderVoters(d) {
     }
     let ioutText = "";
     if (t === "wireless_buck_input" && ioutNow !== null) {
-      ioutText = `<span class="vote-result" title="wls_debug 实时输出电流">实时 iout <b>${fmt(ioutNow, 0)}</b><small>mA</small></span>`;
+      ioutText = `<span class="vote-result" title="wls_debug 实时 RX 输出电流（遥测值）">实际 RX 输出 <b>${fmt(ioutNow, 0)}</b><small>mA</small></span>`;
     }
     let modeText = "";
     if (t === "wireless_buck_input") {
