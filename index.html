@@ -918,6 +918,19 @@ function renderVoters(d) {
       // 总仲裁只展示当前功率链上可物理解释的限制：
       // rx_iout_limit（RX 输出电流上限，允许上限）+ 实测 iout；
       // wireless_buck_input / wls_icl / xm_wls / wireless_qc 不进总仲裁（详情卡保留）
+      // 上游无线平台输入 ICL：wireless_buck_input effective → ADSP 0x1003；
+      // EPP+/QC 下与 RX iout 的映射未闭环，不直接比较；
+      // soc_limit 为 effective winner + SmartEndura 上下文 + ibat≈0 时标记“当前上游限制”。
+      const wbiEff = effectiveOf(buck);
+      if (wbiEff) {
+        const smartStop = wbiEff.client === "soc_limit"
+          && !!buck && buck.smartendura_soc_limit === true
+          && battMa !== null && battMa !== undefined && Math.abs(battMa) <= 300;
+        summary.push(`<span class="chip" title="wireless_buck_input effective → strategy_wireless_set_input_curr_limit → ADSP prop 0x1003（上游无线平台输入 ICL）；EPP+/QC 下与 RX iout 的映射未闭环证明，不做数值一致性比较${smartStop ? "；SmartEndura/soc_limit 停充上下文，当前上游限制" : ""}">` +
+          `无线平台输入 ICL<b>${fmt(wbiEff.value, 0)}</b><small>${esc(wbiEff.client)} · ADSP 0x1003${smartStop ? " · 当前上游限制" : " · 上游策略"}</small></span>`);
+      } else {
+        summary.push(`<span class="chip" title="wireless_buck_input effective 未捕获">无线平台输入 ICL<b>--</b><small>待捕获</small></span>`);
+      }
       if (wlsMode === "epp_qc") {
         summary.push(`<span class="chip" title="RX/TX 功率协商控制（EPP+/QC），与后级 Buck/CP 路径独立">当前无线模式<b>EPP+/QC</b></span>`);
       } else if (wlsMode === "bpp_drawload") {
@@ -1037,7 +1050,7 @@ function renderVoters(d) {
     if (b.icl !== undefined && b.icl !== null) {
       const ago = b.icl_at ? Math.max(0, Math.round((Date.now() - b.icl_at) / 1000)) : null;
       iclText = `<span class="vote-result" title="strategy_wireless_set_input_curr_limit 经 platform_class_buckchg_ops_set_wls_input_curr_lmt 下发 ADSP prop 0x1003；闭源固件如何应用不可见，不等同 RX 输出电流上限">` +
-        `ADSP 无线 ICL <b>${b.icl}</b>mA<small>prop 0x1003` +
+        `无线平台输入 ICL <b>${b.icl}</b>mA<small>ADSP prop 0x1003` +
         `${b.icl_time ? " · " + esc(b.icl_time) : ""}${ago !== null ? " · " + ago + "s前" : ""}</small></span>`;
     }
     let ioutText = "";
@@ -1059,7 +1072,7 @@ function renderVoters(d) {
       if (b.chg_en === 0) {
         modeText += `<span class="vote-result">chg_en <b>0</b><small>当前充电暂停，ICL 非当前瓶颈</small></span>`;
       }
-      modeText += `<span class="vote-result" title="反汇编证据：strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)">说明 <b>已下发 ADSP</b><small>prop 0x1003 · 闭源固件如何应用不可见，不等同 RX 输出电流上限</small></span>`;
+      modeText += `<span class="vote-result" title="反汇编证据：strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)">说明 <b>无线平台输入 ICL（上游）</b><small>ADSP prop 0x1003 · 闭源固件如何应用不可见，不等同 RX 输出电流上限</small></span>`;
       const xmWls = (b.rows || []).find(r => r.client === "xm_wls");
       if (xmWls && xmWls.enable === 1) {
         modeText += `<span class="vote-result" title="xm_wls 是无线能力/适配器允许的最大输入电流票，不是当前仲裁 winner">无线能力票 xm_wls <b>${xmWls.value}</b><small>mA</small></span>`;

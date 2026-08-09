@@ -1229,6 +1229,8 @@ class Sampler:
         self.rx_iout_limit_captured: bool = False
         self.last_rx_iout_limit_at: int | None = None
         self.last_rx_iout_limit_log_time: str | None = None
+        # SmartEndura / smartchg soc_limit 上下文（用于“当前上游限制”标记）
+        self.last_smartendura_soc_limit: bool = False
         # 最后一条 power_good_on 的归一化毫秒，用于识别“新无线会话”
         self.last_wls_session_ms: int | None = None
         # 日志行 stable key：同一行重复扫描不刷新 at（log_time + 关键值）
@@ -1326,6 +1328,12 @@ class Sampler:
             epp = parse_epp_status(session_log)
             if epp is not None:
                 self.last_epp = epp
+            # SmartEndura / smartchg soc_limit 上下文：会话日志中出现即置位
+            self.last_smartendura_soc_limit = any(
+                "smartchg_soc_limit_callback" in line
+                or "smart_charge_soc_limit" in line
+                or "soc_limit_workfunc" in line
+                for line in session_log.splitlines())
             if is_last_wireless_power_off(session_log):
                 # 无线已断开：清掉全部无线会话状态，避免上一会话的值继续显示
                 self._clear_wireless_session_state()
@@ -1607,6 +1615,7 @@ class Sampler:
             buck["rx_iout_limit_at"] = self.last_rx_iout_limit_at or 0
             buck["rx_iout_limit_time"] = self.last_rx_iout_limit_log_time or ""
             buck["rx_iout_limit_stale"] = bool(self.session_logs_stale)
+            buck["smartendura_soc_limit"] = bool(self.last_smartendura_soc_limit)
         # 有线 CP 三态：cp / buck / unknown（时间顺序 + CP 证据优先）
         wstate = self.last_wired_state
         core.setdefault("derived", {})["wired_cp"] = {
