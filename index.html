@@ -943,10 +943,10 @@ function renderVoters(d) {
       const wDecStale = wDecAge !== null && wDecAge > 30;
       if (wCpState === "cp") {
         if (wDecFinal !== null) {
-          summary.push(`<span class="chip"${wDecStale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="quick wireless select_max_ibat 的最终电池电流上限（算法聚合，非 MCA votable）${wDec && wDec.log_time ? " · 日志 " + esc(wDec.log_time) : ""}${wDecStale ? " · 历史值/待刷新" : ""}">` +
-            `当前电池电流上限<b>${fmt(wDecFinal, 0)}</b><small>Quick Wireless${wDecAge !== null ? " · " + wDecAge + "s前" : ""}${wDecStale ? " · 历史值/待刷新" : " · 算法决策"}</small></span>`);
+          summary.push(`<span class="chip"${wDecStale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="quick wireless select_max_ibat 给 CP 路径的最终电池充电电流 ceiling（驱动算法目标；控制环/采样瞬态下实测可能略偏离）${wDec && wDec.log_time ? " · 日志 " + esc(wDec.log_time) : ""}${wDecStale ? " · 历史值/待刷新" : ""}">` +
+            `当前电池充电电流上限<b>${fmt(wDecFinal, 0)}</b><small>Quick Wireless Final${wDecAge !== null ? " · " + wDecAge + "s前" : ""}${wDecStale ? " · 历史值/待刷新" : ""}</small></span>`);
         } else {
-          summary.push(`<span class="chip" title="CP 路径生效但尚未捕获 cur_max:[Final]">当前电池电流上限<b>--</b><small>Quick Wireless 待捕获</small></span>`);
+          summary.push(`<span class="chip" title="CP 路径生效但尚未捕获 cur_max:[Final]">当前电池充电电流上限<b>--</b><small>Quick Wireless Final 待捕获</small></span>`);
         }
         // 无线热控上限：识别当前有效功率档的 wireless_thermal_(20/30/50/80)w 票。
         // 恰好 1 个 → 显示该票；0 个 → 待确认；>1 个且无法确定功率档 → 多票待确认，
@@ -968,9 +968,9 @@ function renderVoters(d) {
           summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b>${fmt(Math.abs(battMa), 0)}</b><small>battery</small></span>`);
         }
       } else if (wCpState === "buck") {
-        addSummary("当前电池电流上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+        addSummary("当前电池充电电流上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
       } else {
-        summary.push(`<span class="chip" title="无线功率路径尚未确认，不拿 Buck 路径 FCC 冒充当前上限">当前电池电流上限<b>--</b><small>路径待确认</small></span>`);
+        summary.push(`<span class="chip" title="无线功率路径尚未确认，不拿 Buck 路径 FCC 冒充当前上限">当前电池充电电流上限<b>--</b><small>路径待确认</small></span>`);
       }
     }
     addSummary("充电使能", ceEff, v => (v === 1 ? "ON" : "OFF"));
