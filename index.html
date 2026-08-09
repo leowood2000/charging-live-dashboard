@@ -932,9 +932,30 @@ function renderVoters(d) {
       if (ioutNow !== null) {
         summary.push(`<span class="chip" title="wls_debug 实时 RX 输出电流（遥测值）">实际 RX 输出<b>${fmt(ioutNow, 0)}</b><small>mA · 实时</small></span>`);
       }
-      // 无线路径：电池侧只显示 buck_charge_curr 的 MCA 仲裁结果（最终生效值）；
-      // quick_wireless cur_max 不进总仲裁（保留在下方 Quick Wireless 电池电流决策卡）
-      addSummary("电池充电电流上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+      // 无线路径：电池侧 ceiling 按当前功率路径选择——
+      // CP 生效 → quick wireless cur_max:[Final]（算法决策，允许上限，带年龄）
+      // Buck 生效 → buck_charge_curr MCA effective
+      // 路径未确认 → 显示待确认，不用 buck_charge_curr 冒充当前上限
+      const wCpState = buck && buck.cp_state;
+      const wDec = buck && buck.cur_max_decision;
+      const wDecFinal = wDec && wDec.final !== null && wDec.final !== undefined ? wDec.final : null;
+      const wDecAge = wDec && wDec.at ? Math.max(0, Math.round((Date.now() - wDec.at) / 1000)) : null;
+      const wDecStale = wDecAge !== null && wDecAge > 30;
+      if (wCpState === "cp") {
+        if (wDecFinal !== null) {
+          summary.push(`<span class="chip"${wDecStale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="quick wireless select_max_ibat 的最终电池电流上限（算法聚合，非 MCA votable）${wDec && wDec.log_time ? " · 日志 " + esc(wDec.log_time) : ""}${wDecStale ? " · 历史值/待刷新" : ""}">` +
+            `当前电池电流上限<b>${fmt(wDecFinal, 0)}</b><small>Quick Wireless${wDecAge !== null ? " · " + wDecAge + "s前" : ""}${wDecStale ? " · 历史值/待刷新" : " · 算法决策"}</small></span>`);
+        } else {
+          summary.push(`<span class="chip" title="CP 路径生效但尚未捕获 cur_max:[Final]">当前电池电流上限<b>--</b><small>Quick Wireless 待捕获</small></span>`);
+        }
+        if (battMa !== null && battMa !== undefined) {
+          summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b>${fmt(Math.abs(battMa), 0)}</b><small>battery</small></span>`);
+        }
+      } else if (wCpState === "buck") {
+        addSummary("当前电池电流上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+      } else {
+        summary.push(`<span class="chip" title="无线功率路径尚未确认，不拿 Buck 路径 FCC 冒充当前上限">当前电池电流上限<b>--</b><small>路径待确认</small></span>`);
+      }
     }
     addSummary("充电使能", ceEff, v => (v === 1 ? "ON" : "OFF"));
     if (ceStopping) {
@@ -1032,8 +1053,12 @@ function renderVoters(d) {
         modeText += `<span class="vote-result" title="strategy_class_wireless_op_get_rx_iout_limit 输出（驱动策略层上限，未确认对应芯片寄存器）">RX 输出电流上限 <b>${fmt(b.rx_iout_limit, 0)}</b><small>mA · driver</small></span>`;
       }
     }
+    let buckPathNote = "";
+    if (t === "buck_charge_curr" && wirelessActive && buck && buck.cp_state === "cp") {
+      buckPathNote = `<span class="vote-result" title="mca_buckchg_jeita / buck_fcc 是 Buck 充电器路径自己的 FCC；当前 CP 路径采用 quick wireless cur_max:[Final]">Buck 路径 FCC · 当前 CP 路径不采用</span>`;
+    }
     return `<div class="card"><h2>${esc(t)}<span class="tag">${active}/${rows.length} 票</span></h2>` +
-      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}${ioutText}${modeText}</div>` +
+      `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}${ioutText}${modeText}${buckPathNote}</div>` +
       `<div class="vote-chips">${chips}</div></div>`;
   }).join("");
   // JEITA 终止参数是温度档决定的静态常数，合并为一张卡
