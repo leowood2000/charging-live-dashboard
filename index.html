@@ -937,6 +937,9 @@ function renderVoters(d) {
       // Buck 生效 → buck_charge_curr MCA effective
       // 路径未确认 → 显示待确认，不用 buck_charge_curr 冒充当前上限
       const wCpState = buck && buck.cp_state;
+      // 20/30/50/80W 是充电器类别：类别由 buck_charge_curr 中唯一启用的
+      // wireless_thermal_(20/30/50/80)w 标识（驱动按检测类别启用）。
+      const W_THERMAL_LABELS = { 20: "20W 类充电器", 30: "30W 类充电器", 50: "50W 类充电器", 80: "80W 类充电器" };
       const wDec = buck && buck.cur_max_decision;
       const wDecFinal = wDec && wDec.final !== null && wDec.final !== undefined ? wDec.final : null;
       const wDecAge = wDec && wDec.at ? Math.max(0, Math.round((Date.now() - wDec.at) / 1000)) : null;
@@ -948,24 +951,40 @@ function renderVoters(d) {
         } else {
           summary.push(`<span class="chip" title="CP 路径生效但尚未捕获 cur_max:[Final]">当前电池充电电流上限<b>--</b><small>Quick Wireless Final 待捕获</small></span>`);
         }
-        // 无线热控上限：识别当前有效功率档的 wireless_thermal_(20/30/50/80)w 票。
-        // 恰好 1 个 → 显示该票；0 个 → 待确认；>1 个且无法确定功率档 → 多票待确认，
-        // 不做 max/min 猜测（功率档识别后续可接 power_max / wireless_auth_* 票）。
-        // 20/30/50/80W 是充电器类别：驱动按检测到的类别启用对应 voter，enable 即类别选择。
-        const W_THERMAL_LABELS = { 20: "20W 类充电器", 30: "30W 类充电器", 50: "50W 类充电器", 80: "80W 类充电器" };
+        // 无线热控上限（CP）：热控值取 wireless_sw_thermal_ich effective
+        // （→ sw_thermal_ichg → select_max_ibat → cur_max:[Final]）；
+        // wireless_thermal_XXw 仅用于标识充电器类别。
         const wThermalRows = (topics.buck_charge_curr && topics.buck_charge_curr.rows || [])
           .filter(r => /^wireless_thermal_(20|30|50|80)w$/.test(r.client) && r.enable === 1 && r.value > 0);
+        let wCatLabel = null;
         if (wThermalRows.length === 1) {
-          const wt = wThermalRows[0];
-          const wCat = (wt.client.match(/wireless_thermal_(\d+)w/) || [])[1];
-          summary.push(`<span class="chip" title="驱动按检测到的充电器类别启用的 wireless_thermal_${wCat}w 票（热控允许值；CP 下不代表最终上限）">无线热控上限<b>${fmt(wt.value, 0)}</b><small>${wCat && W_THERMAL_LABELS[wCat] ? W_THERMAL_LABELS[wCat] : esc(wt.client)}</small></span>`);
-        } else if (wThermalRows.length > 1) {
+          const wCat = (wThermalRows[0].client.match(/wireless_thermal_(\d+)w/) || [])[1];
+          wCatLabel = wCat && W_THERMAL_LABELS[wCat] ? W_THERMAL_LABELS[wCat] : null;
+        }
+        const wswEff = effectiveOf(topics.wireless_sw_thermal_ich);
+        if (wswEff) {
+          const catTip = wCatLabel
+            ? " · 类别由 " + esc(wThermalRows[0].client) + " voter 标识"
+            : (wThermalRows.length > 1 ? " · 类别多票待确认" : "");
+          summary.push(`<span class="chip" title="CP 路径热控输入：wireless_sw_thermal_ich effective → sw_thermal_ichg → cur_max:[Final]${catTip}">` +
+            `无线热控上限<b>${fmt(wswEff.value, 0)}</b><small>wireless_sw_thermal_ich${wCatLabel ? " · " + wCatLabel : ""}</small></span>`);
+        } else {
+          summary.push(`<span class="chip" title="CP 路径热控输入 wireless_sw_thermal_ich 未捕获">无线热控上限<b>--</b><small>wireless_sw_thermal_ich 待确认</small></span>`);
+        }
+      } else if (wCpState === "buck") {
+        addSummary("当前电池充电电流上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+        // 无线热控上限（Buck）：直接取 buck_charge_curr 中唯一启用的 wireless_thermal_XXw
+        const wThermalRowsB = (topics.buck_charge_curr && topics.buck_charge_curr.rows || [])
+          .filter(r => /^wireless_thermal_(20|30|50|80)w$/.test(r.client) && r.enable === 1 && r.value > 0);
+        if (wThermalRowsB.length === 1) {
+          const wtb = wThermalRowsB[0];
+          const wCatB = (wtb.client.match(/wireless_thermal_(\d+)w/) || [])[1];
+          summary.push(`<span class="chip" title="Buck 路径热控输入：buck_charge_curr / wireless_thermal_XXw → Buck FCC">无线热控上限<b>${fmt(wtb.value, 0)}</b><small>${wCatB && W_THERMAL_LABELS[wCatB] ? W_THERMAL_LABELS[wCatB] : esc(wtb.client)}</small></span>`);
+        } else if (wThermalRowsB.length > 1) {
           summary.push(`<span class="chip" title="多个 wireless_thermal_* 档同时启用且非零，当前功率档无法确认，不做 max 猜测">无线热控上限<b>--</b><small>多票待确认</small></span>`);
         } else {
           summary.push(`<span class="chip" title="当前没有启用且非零的 wireless_thermal_(20/30/50/80)w 票">无线热控上限<b>--</b><small>无热控票</small></span>`);
         }
-      } else if (wCpState === "buck") {
-        addSummary("当前电池充电电流上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
       } else {
         summary.push(`<span class="chip" title="无线功率路径尚未确认，不拿 Buck 路径 FCC 冒充当前上限">当前电池充电电流上限<b>--</b><small>路径待确认</small></span>`);
       }
