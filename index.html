@@ -1114,7 +1114,7 @@ function renderVoters(d) {
     ? `<div class="card"><h2>电流投票实时表<span class="tag">未充电</span></h2>` +
       `<p class="note">当前未充电（battery STATUS ≠ Charging），投票/仲裁不生效。</p></div>`
     : "";
-  el.innerHTML = summaryCard + notChargingNote + cardsShown + quickCard + jeitaCard;
+  el.innerHTML = summaryCard + quickCard + notChargingNote + cardsShown + jeitaCard;
 }
 
 function renderCharts(d) {

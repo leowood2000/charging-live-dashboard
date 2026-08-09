@@ -1327,42 +1327,21 @@ class Sampler:
             if epp is not None:
                 self.last_epp = epp
             if is_last_wireless_power_off(session_log):
-                # 无线已断开：清掉旧 ICL，避免上一个会话的值继续显示
-                self.last_wls_icl = None
-                self.last_wls_icl_at = None
-                self.last_wls_icl_log_time = None
-                self.last_wls_icl_ms = None
-                self.last_wls_icl_key = None
-                self.last_wls_chg_en = None
-                self.last_epp = None
-                self.last_quick_cur_max = None
-                self.last_buck_fcc = None
-                self.last_cp_mode = None
-                self.last_cp_work_mode = None
-                self.last_wls_work_mode_ms = None
-                self.last_cur_decision = None
-                self.last_cur_decision_key = None
-                self.last_wls_mode = "unknown"
-                self.last_rx_iout_limit = None
-                self.rx_iout_limit_captured = False
-                self.last_rx_iout_limit_at = None
-                self.last_rx_iout_limit_log_time = None
+                # 无线已断开：清掉全部无线会话状态，避免上一会话的值继续显示
+                self._clear_wireless_session_state()
                 self.last_wls_session_ms = None
             else:
                 # 所有无线执行层数据统一按最近一次 power_good_on 截断，
                 # 避免上一会话的 ICL/buck_fcc 混进新会话
                 wtail = split_after_last_wireless_attach(session_log)
-                # rx_iout_limit 状态机：
-                # power_good_on → 清空；本会话首次/后续出现 → 更新；
-                # work_mode 切换、日志窗口滚动 → 不处理，继续持有旧值
+                # 无线会话状态机：只有真正的新 power_good_on（session key 变化）
+                # 才统一清空全部 wireless-session scoped 状态；
+                # 同一 power_good_on 重复出现在日志窗口不重置，避免 Final/ICL 假刷新。
                 pg_ms = last_wireless_attach_ms(
                     session_log, self.adb.utc_offset_minutes, self.last_log_fname)
                 if pg_ms is not None and pg_ms != self.last_wls_session_ms:
                     self.last_wls_session_ms = pg_ms
-                    self.last_rx_iout_limit = None
-                    self.rx_iout_limit_captured = False
-                    self.last_rx_iout_limit_at = None
-                    self.last_rx_iout_limit_log_time = None
+                    self._clear_wireless_session_state()
                 wm = parse_wireless_mode(wtail, self.adb.utc_offset_minutes)
                 self.last_wls_mode = wm["mode"]
                 if wm["rx_iout_limit"] is not None:
@@ -1388,10 +1367,35 @@ class Sampler:
                     self.last_buck_fcc = buck_fcc
         # 功率路径：高频信号专用通道（手机端已 tail -n 200 封顶）
         if pp_read_ok and pp_log.strip():
-            # quick wireless cur_max 同样只取最近一次无线会话之后，
-            # 断开时保持清空，避免旧窗口里的 Final 又被写回
-            if is_last_wireless_power_off(pp_log):
+            pp_off = is_last_wireless_power_off(pp_log)
+            pg_ms_pp = last_wireless_attach_ms(
+                pp_log, self.adb.utc_offset_minutes, self.last_log_fname)
+            # 只有 pp 窗口出现比已确认会话更新的 power_good_on 才算真正新会话；
+            # 同一 power_good_on 重复出现在 tail 窗口不重置（避免 Final 假刷新）。
+            pp_new_session = (
+                not pp_off and pg_ms_pp is not None
+                and (self.last_wls_session_ms is None
+                     or pg_ms_pp > self.last_wls_session_ms))
+            if pp_off:
+                # pp 通道明确断开（session 通道失败时的兜底）：清无线 CP/quick 状态
+                self.last_cp_mode = None
+                self.last_cp_work_mode = None
+                self.last_wls_work_mode_ms = None
+                self.last_cur_decision = None
+                self.last_cur_decision_key = None
                 self.last_quick_cur_max = None
+                self.last_wls_session_ms = None
+            elif pp_new_session:
+                # 真正的新无线会话边界：统一清空 wireless-session scoped 状态，
+                # 本轮 pp 有新证据再重新填（避免旧 Final 串进新会话）
+                self.last_wls_session_ms = pg_ms_pp
+                self._clear_wireless_session_state()
+            # quick wireless cur_max：只接受当前会话窗口内的值
+            if pp_off:
+                self.last_quick_cur_max = None
+            elif pg_ms_pp is not None and pg_ms_pp != self.last_wls_session_ms:
+                # pp 窗口边界与会话 key 不一致：不采纳旧会话 cur_max
+                pass
             else:
                 wt = split_after_last_wireless_attach(pp_log)
                 quick_cur_max = parse_quick_cur_max(wt)
@@ -1437,13 +1441,19 @@ class Sampler:
                                            old.get("vbus_mv"),
                                            old.get("ibus_ma")) != key:
                             self.last_wired_buck_tel = buck_tel
-            # 无线 track：power_good 边界
-            if w_boundary:
+            # 无线 track：复用会话 key。同一 power_good_on 反复出现在窗口
+            # 不重置 last_cur_decision_key，避免 at 被“本次扫描时间”假刷新。
+            if pp_off:
+                pass  # 上面已清空
+            elif pp_new_session:
                 self.last_cp_mode = w_cp_mode
                 self.last_cp_work_mode = w_cp_work_mode
                 self.last_wls_work_mode_ms = w_cp_work_mode_ms
                 self.last_cur_decision = w_decision
                 self.last_cur_decision_key = None
+            elif w_boundary and pg_ms_pp != self.last_wls_session_ms:
+                # pp 窗口里的边界与已确认会话不一致：不采纳本轮 CP/Final
+                pass
             else:
                 if w_cp_mode is not None:
                     self.last_cp_mode = w_cp_mode
@@ -1504,6 +1514,32 @@ class Sampler:
             core = copy.deepcopy(self.snapshot)
             self._merge_cached_logs(core)
             self.snapshot = core
+
+    def _clear_wireless_session_state(self) -> None:
+        """无线会话级状态统一清空：真正的新 power_good_on 或断开时调用。
+
+        last_wls_session_ms 由调用方维护；这里只清 wireless-session scoped 数据，
+        避免上一会话的 Final/CP/ICL/rx_iout_limit 冒充当前会话。
+        """
+        self.last_wls_icl = None
+        self.last_wls_icl_at = None
+        self.last_wls_icl_log_time = None
+        self.last_wls_icl_ms = None
+        self.last_wls_icl_key = None
+        self.last_wls_chg_en = None
+        self.last_epp = None
+        self.last_quick_cur_max = None
+        self.last_buck_fcc = None
+        self.last_cp_mode = None
+        self.last_cp_work_mode = None
+        self.last_wls_work_mode_ms = None
+        self.last_cur_decision = None
+        self.last_cur_decision_key = None
+        self.last_wls_mode = "unknown"
+        self.last_rx_iout_limit = None
+        self.rx_iout_limit_captured = False
+        self.last_rx_iout_limit_at = None
+        self.last_rx_iout_limit_log_time = None
 
     def _merge_cached_logs(self, core: dict) -> None:
         core["voters"] = copy.deepcopy(self.last_voters)
