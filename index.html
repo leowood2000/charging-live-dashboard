@@ -790,7 +790,6 @@ function renderVoters(d) {
       `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : ""}</small></span>`);
   };
   const buck = topics.wireless_buck_input;
-  const mcaEff = effectiveOf(buck);
   if (chargingNow && wirelessActive) {
     const ratio = buck && buck.cp_ratio
       ? (buck.cp_ratio === 1 ? "1:1（bypass）"
@@ -814,42 +813,7 @@ function renderVoters(d) {
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;
-  // BPP drawload 阶段 iwls 与 iout 同域，直接比较实际 RX 输出电流与 ICL；
-  // Vrect/Vbat 折算只适用于“输入侧 ICL → 电池侧 Ibat”的功率守恒比较，不用于此处
-  const iclNotEffective = (icl, iout) => {
-    if (icl === null || icl === undefined || iout === null || iout === undefined) return false;
-    return iout > icl * 1.15 + 100;
-  };
   const wlsMode = buck && buck.wls_mode;
-  // 只有 BPP drawload 阶段 iwls 与 iout 同域，才做一致性检查；
-  // EPP+/QC 阶段 wls_icl 与 iout 属于不同控制域，禁止比较
-  const iclBad = wlsMode === "bpp_drawload" && buck && buck.icl !== undefined && buck.icl !== null
-    ? iclNotEffective(buck.icl, ioutNow) : false;
-  // 总仲裁无线输入项：主值永远为 wireless_buck_input 的 MCA effective（仲裁结果）；
-  // 执行层 ICL 作为次级信息单独展示（一致 / 下游进一步限制 / 充电暂停），
-  // effective 生命周期只随会话（power_good_off 清空），work_mode 变化不使其失效
-  if (chargingNow && wirelessActive && buck) {
-    const workMs = buck.wls_work_mode_ms || 0;
-    const iclCur = buck.icl !== null && buck.icl !== undefined
-      && (!workMs || (buck.icl_ms || 0) >= workMs);
-    if (mcaEff) {
-      summary.push(`<span class="chip" title="wireless_buck_input MCA votable 逻辑仲裁结果（effective 赢家为准；EPP+/QC 下属策略控制域，不等同 RX 物理输入电流上限）">` +
-        `无线输入仲裁<b>${fmt(mcaEff.value, 0)}</b><small>${esc(mcaEff.client)}</small></span>`);
-    } else {
-      summary.push(`<span class="chip" title="未捕获 wireless_buck_input effective，不以执行 ICL 反推仲裁">` +
-        `无线输入仲裁<b>--</b><small>未捕获</small></span>`);
-    }
-    if (iclCur) {
-      const isEpp = buck.wls_mode === "epp_qc";
-      const rel = buck.chg_en === 0 ? "充电暂停"
-        : isEpp ? "EPP+/QC 控制量 · 与 RX iout 不同域"
-        : (mcaEff && mcaEff.value === buck.icl) ? "一致"
-        : (mcaEff && mcaEff.value > buck.icl) ? "下游进一步限制"
-        : (mcaEff && mcaEff.value < buck.icl) ? "执行高于仲裁" : "执行层下发";
-      summary.push(`<span class="chip" title="${isEpp ? "wireless loop 策略 ICL 控制量（EPP+/QC 控制域，非 RX 物理输入上限）" : "wireless loop 实际下发 ICL（执行层控制值，非仲裁结果）"}">` +
-        `${isEpp ? "策略 ICL" : "执行 ICL"}<b>${fmt(buck.icl, 0)}</b><small>${rel}</small></span>`);
-    }
-  }
   if (chargingNow) {
     const realTypeNode = (d.nodes || []).find(n => n.id === "real_type");
     const connLabel = wiredCharging ? "有线" : wirelessCharging ? "无线" : "未知";
@@ -951,12 +915,22 @@ function renderVoters(d) {
       }
     } else if (wirelessActive) {
       // 无线协议控制域（前级）与后级 Buck/CP 路径是独立维度：
-      // 总仲裁只保留“当前参与限制的关键结果”：rx_iout_limit 是策略上限、
-      // iout 是遥测值，均不进总仲裁（保留在详情卡/KPI）
+      // 总仲裁只展示当前功率链上可物理解释的限制：
+      // rx_iout_limit（RX 输出电流上限，允许上限）+ 实测 iout；
+      // wireless_buck_input / wls_icl / xm_wls / wireless_qc 不进总仲裁（详情卡保留）
       if (wlsMode === "epp_qc") {
         summary.push(`<span class="chip" title="RX/TX 功率协商控制（EPP+/QC），与后级 Buck/CP 路径独立">当前无线模式<b>EPP+/QC</b></span>`);
       } else if (wlsMode === "bpp_drawload") {
-        summary.push(`<span class="chip" title="BPP drawload 环控制：iwls 与 iout 同域">当前无线模式<b>BPP · drawload</b></span>`);
+        summary.push(`<span class="chip" title="BPP drawload 控制环（仅模式标识，不据此做 ICL/iout 一致性判定）">当前无线模式<b>BPP · drawload</b></span>`);
+      }
+      const rxLimit = buck && buck.rx_iout_limit !== null && buck.rx_iout_limit !== undefined
+        ? buck.rx_iout_limit : null;
+      const rxOk = rxLimit !== null && !!buck && buck.rx_iout_limit_captured;
+      const rxStale = buck && buck.rx_iout_limit_stale;
+      summary.push(`<span class="chip" title="strategy_class_wireless_op_get_rx_iout_limit 按充电器类型/模式查表得到的 RX 输出电流上限；允许上限而非当前瓶颈；随无线会话有效，work_mode 切换不失效${rxStale ? " · 会话日志读取异常，显示上次成功值" : ""}">` +
+        `RX 输出电流上限<b>${rxOk ? fmt(rxLimit, 0) : "--"}</b><small>${rxOk ? "允许上限" : rxStale ? "待确认 · 数据陈旧" : "待确认"}</small></span>`);
+      if (ioutNow !== null) {
+        summary.push(`<span class="chip" title="wls_debug 实时 RX 输出电流（遥测值）">实际 RX 输出<b>${fmt(ioutNow, 0)}</b><small>mA · 实时</small></span>`);
       }
       // 无线路径：电池侧只显示 buck_charge_curr 的 MCA 仲裁结果（最终生效值）；
       // quick_wireless cur_max 不进总仲裁（保留在下方 Quick Wireless 电池电流决策卡）
@@ -1025,15 +999,10 @@ function renderVoters(d) {
     }
     let iclText = "";
     if (b.icl !== undefined && b.icl !== null) {
-      const isEpp = b.wls_mode === "epp_qc";
       const ago = b.icl_at ? Math.max(0, Math.round((Date.now() - b.icl_at) / 1000)) : null;
-      const iclOld = (b.wls_work_mode_ms || 0) > 0 && (b.icl_ms || 0) < (b.wls_work_mode_ms || 0);
-      let diff = "";
-      if (resultValid(b)) diff = ` · Δ${b.icl - b.result.value}mA`;
-      iclText = `<span class="vote-result" title="${isEpp ? "EPP+/QC 阶段：wls_icl 是策略控制量，非当前 iout 限流" : "驱动 wireless loop 实际下发 icl（非 MCA 仲裁值）"}">${isEpp ? "wls_icl 控制量" : "实际下发 ICL"} <b>${b.icl}</b>mA` +
-        `<small>${b.icl_time ? esc(b.icl_time) + " " : ""}${ago !== null ? ago + "s前" : ""}${diff}${iclOld ? " · 历史 ICL（work_mode 前）" : ""}${isEpp ? " · 非当前 iout 限流" : ""}` +
-        (iclBad ? ` <span style="color:var(--amber);border:1px solid rgba(251,191,36,.5);border-radius:4px;padding:0 4px">限流未生效</span>` : "") +
-        `</small></span>`;
+      iclText = `<span class="vote-result" title="strategy_wireless_set_input_curr_limit 经 platform_class_buckchg_ops_set_wls_input_curr_lmt 下发 ADSP prop 0x1003；闭源固件如何应用不可见，不等同 RX 输出电流上限">` +
+        `ADSP 无线 ICL <b>${b.icl}</b>mA<small>prop 0x1003` +
+        `${b.icl_time ? " · " + esc(b.icl_time) : ""}${ago !== null ? " · " + ago + "s前" : ""}</small></span>`;
     }
     let ioutText = "";
     if (t === "wireless_buck_input" && ioutNow !== null) {
@@ -1043,39 +1012,23 @@ function renderVoters(d) {
     if (t === "wireless_buck_input") {
       const wm = b.wls_mode;
       if (wm === "bpp_drawload") {
-        modeText = `<span class="vote-result" title="BPP drawload 环控制：iwls 与 iout 同域，可做一致性比较">控制模式 <b>BPP · drawload</b></span>`;
+        modeText = `<span class="vote-result" title="BPP drawload 控制环（仅模式标识，不据此做 ICL/iout 一致性判定）">控制模式 <b>BPP · drawload</b></span>`;
       } else if (wm === "epp_qc") {
-        modeText = `<span class="vote-result" title="EPP+/QC：wls_icl 与 iout 属于不同控制域，禁止用 ICL 判断未生效">控制模式 <b>EPP+/QC</b><small>wls_icl 与 iout 不同域</small></span>`;
+        modeText = `<span class="vote-result" title="EPP+/QC：wls_icl 经 0x1003 下发 ADSP，与 wls_debug iout 属不同链路，不做数值比较">控制模式 <b>EPP+/QC</b><small>wls_icl 与 iout 不同链路</small></span>`;
       } else {
         modeText = `<span class="vote-result" title="无线控制模式未知">控制模式 <b>待确认</b></span>`;
       }
-      // 生效三态 + 仲裁/执行一致性：chg_en=0 → 暂停；同域矛盾 → 疑似未生效；
-      // 两者都新鲜时比较 effective 与 ICL 是否一致，执行值更低说明下游另有约束
-      const effVal = resultValid(b) ? b.result.value : null;
-      const iclVal = (b.icl !== null && b.icl !== undefined) ? b.icl : null;
-      const iclOld = (b.wls_work_mode_ms || 0) > 0 && (b.icl_ms || 0) < (b.wls_work_mode_ms || 0);
-      if (iclBad) {
-        modeText += `<span class="vote-result" style="color:var(--amber)">状态 <b>疑似未生效</b><small>BPP 同域电流持续超过 ICL</small></span>`;
-      } else if (b.chg_en === 0) {
-        modeText += `<span class="vote-result">状态 <b>已生效 · 当前充电暂停</b><small>chg_en=0，限流非当前瓶颈</small></span>`;
-      } else if (wm === "bpp_drawload" && iclVal !== null && effVal !== null && !iclOld) {
-        const delta = iclVal - effVal;
-        const eq = delta === 0;
-        modeText += `<span class="vote-result"${delta < 0 ? ' style="color:var(--amber)"' : ""}>状态 <b>${eq ? "仲裁与执行一致" : delta < 0 ? "执行值低于仲裁值" : "执行值高于仲裁值"}</b><small>仲裁 ${effVal}mA / 执行 ICL ${iclVal}mA${delta < 0 ? " · 下游另有约束" : ""}</small></span>`;
-      } else if (iclVal !== null && effVal !== null && !iclOld) {
-        modeText += `<span class="vote-result">状态 <b>已生效（仲裁）</b><small>${wm === "epp_qc" ? "EPP+/QC 控制域，不做数值比较" : "当前模式不做数值比较"}</small></span>`;
-      } else if (effVal !== null) {
-        modeText += `<span class="vote-result">状态 <b>已生效（仲裁）</b><small>当前路径 ICL 待捕获</small></span>`;
-      } else if (iclVal !== null) {
-        modeText += `<span class="vote-result">状态 <b>已下发（未捕获仲裁）</b><small>执行 ICL ${iclVal}mA，effective 待捕获</small></span>`;
-      } else {
-        modeText += `<span class="vote-result">状态 <b>待确认</b><small>无有效 ICL / effective</small></span>`;
+      // 反编译结论：该值是真实 mA 的 wls_icl，已下发 ADSP（prop 0x1003）；
+      // 不再用 ICL 与 iout 做“生效/未生效”判定，也不随 work_mode 失效
+      if (b.chg_en === 0) {
+        modeText += `<span class="vote-result">chg_en <b>0</b><small>当前充电暂停，ICL 非当前瓶颈</small></span>`;
       }
+      modeText += `<span class="vote-result" title="反汇编证据：strategy_wireless_set_input_curr_limit → platform_class_buckchg_ops_set_wls_input_curr_lmt → mca_adsp_glink_write_prop(0x1003)">说明 <b>已下发 ADSP</b><small>prop 0x1003 · 闭源固件如何应用不可见，不等同 RX 输出电流上限</small></span>`;
       const xmWls = (b.rows || []).find(r => r.client === "xm_wls");
       if (xmWls && xmWls.enable === 1) {
         modeText += `<span class="vote-result" title="xm_wls 是无线能力/适配器允许的最大输入电流票，不是当前仲裁 winner">无线能力票 xm_wls <b>${xmWls.value}</b><small>mA</small></span>`;
       }
-      if (b.rx_iout_limit !== null && b.rx_iout_limit !== undefined) {
+      if (b.rx_iout_limit !== null && b.rx_iout_limit !== undefined && b.rx_iout_limit_captured) {
         modeText += `<span class="vote-result" title="strategy_class_wireless_op_get_rx_iout_limit 输出（驱动策略层上限，未确认对应芯片寄存器）">RX 输出电流上限 <b>${fmt(b.rx_iout_limit, 0)}</b><small>mA · driver</small></span>`;
       }
     }

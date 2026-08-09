@@ -982,16 +982,30 @@ def split_after_last_wireless_attach(text: str) -> str:
     return "\n".join(lines[last + 1:]) if last >= 0 else text
 
 
-def parse_wireless_mode(text: str) -> dict:
+def last_wireless_attach_ms(text: str, offset_minutes: int = 0,
+                            fname: str = "") -> int | None:
+    """最后一条 wireless power_good_on 的归一化日志毫秒（会话边界 key）。"""
+    last = None
+    for line in text.splitlines():
+        if "power_good_on" not in line:
+            continue
+        tm = VOTE_TIME_RE.search(line)
+        if tm:
+            last = abs_log_ms(fname, shift_log_time(tm.group(1), offset_minutes))
+    return last
+
+
+def parse_wireless_mode(text: str, offset_minutes: int = 0) -> dict:
     """解析当前无线会话的控制模式与 RX 输出电流上限。
 
     同一 power_good_on 会话内按日志顺序扫描，最后证据覆盖前证据：
-    - BPP drawload → bpp_drawload：drawload 环控制，iwls≈iout，ICL/iout 同域
+    - BPP drawload → bpp_drawload（仅模式标识，不做 ICL/iout 一致性判定）
     - epp plus / EPP+ / rx_iout_limit / can quick charge! / vout range request
-      → epp_qc：wls_icl 与 iout 属于不同控制域，不能做一致性比较
+      → epp_qc
     """
     mode = "unknown"
     rx_iout_limit: int | None = None
+    rx_iout_limit_time = ""
     qc_enabled = False
     for line in text.splitlines():
         if "BPP drawload" in line:
@@ -1006,9 +1020,13 @@ def parse_wireless_mode(text: str) -> dict:
         # 也会匹配，必须取该行最后一次匹配（真正的 rx_iout_limit: 3800）
         for mm in re.finditer(r"rx_iout_limit:\s*(\d+)", line):
             rx_iout_limit = int(mm.group(1))
+            tm = VOTE_TIME_RE.search(line)
+            if tm:
+                rx_iout_limit_time = shift_log_time(tm.group(1), offset_minutes)
         if "can quick charge!" in line:
             qc_enabled = True
     return {"mode": mode, "rx_iout_limit": rx_iout_limit,
+            "rx_iout_limit_time": rx_iout_limit_time,
             "qc_enabled": qc_enabled}
 
 
@@ -1206,6 +1224,13 @@ class Sampler:
         # 无线控制模式与 RX 输出电流上限（bpp drawload / epp_plus/QC）
         self.last_wls_mode = "unknown"
         self.last_rx_iout_limit: int | None = None
+        # rx_iout_limit 会话状态机：随 power_good 边界，不随 work_mode；
+        # captured=false 表示本会话尚未捕获；日志窗口滚动不失效；断开清空
+        self.rx_iout_limit_captured: bool = False
+        self.last_rx_iout_limit_at: int | None = None
+        self.last_rx_iout_limit_log_time: str | None = None
+        # 最后一条 power_good_on 的归一化毫秒，用于识别“新无线会话”
+        self.last_wls_session_ms: int | None = None
         # 日志行 stable key：同一行重复扫描不刷新 at（log_time + 关键值）
         self.last_cur_decision_key: tuple | None = None
         self.last_wired_cur_max_key: tuple | None = None
@@ -1319,13 +1344,32 @@ class Sampler:
                 self.last_cur_decision_key = None
                 self.last_wls_mode = "unknown"
                 self.last_rx_iout_limit = None
+                self.rx_iout_limit_captured = False
+                self.last_rx_iout_limit_at = None
+                self.last_rx_iout_limit_log_time = None
+                self.last_wls_session_ms = None
             else:
                 # 所有无线执行层数据统一按最近一次 power_good_on 截断，
                 # 避免上一会话的 ICL/buck_fcc 混进新会话
                 wtail = split_after_last_wireless_attach(session_log)
-                wm = parse_wireless_mode(wtail)
+                # rx_iout_limit 状态机：
+                # power_good_on → 清空；本会话首次/后续出现 → 更新；
+                # work_mode 切换、日志窗口滚动 → 不处理，继续持有旧值
+                pg_ms = last_wireless_attach_ms(
+                    session_log, self.adb.utc_offset_minutes, self.last_log_fname)
+                if pg_ms is not None and pg_ms != self.last_wls_session_ms:
+                    self.last_wls_session_ms = pg_ms
+                    self.last_rx_iout_limit = None
+                    self.rx_iout_limit_captured = False
+                    self.last_rx_iout_limit_at = None
+                    self.last_rx_iout_limit_log_time = None
+                wm = parse_wireless_mode(wtail, self.adb.utc_offset_minutes)
                 self.last_wls_mode = wm["mode"]
-                self.last_rx_iout_limit = wm["rx_iout_limit"]
+                if wm["rx_iout_limit"] is not None:
+                    self.last_rx_iout_limit = wm["rx_iout_limit"]
+                    self.rx_iout_limit_captured = True
+                    self.last_rx_iout_limit_at = int(time.time() * 1000)
+                    self.last_rx_iout_limit_log_time = wm["rx_iout_limit_time"] or ""
                 icl = parse_wls_icl(
                     wtail, self.adb.utc_offset_minutes, self.last_log_fname)
                 if icl is not None:
@@ -1498,10 +1542,14 @@ class Sampler:
                 buck["wls_work_mode_ms"] = self.last_wls_work_mode_ms
             if self.last_cur_decision is not None:
                 buck["cur_max_decision"] = copy.deepcopy(self.last_cur_decision)
-            # 无线控制模式：BPP drawload 同域可比较；EPP+/QC 不同域不可比较
+            # 无线控制模式：仅标识 BPP drawload / EPP+/QC，不做 ICL/iout 一致性判定
             buck["wls_mode"] = self.last_wls_mode
-            if self.last_rx_iout_limit is not None:
-                buck["rx_iout_limit"] = self.last_rx_iout_limit
+            # rx_iout_limit：会话状态机输出（captured / at / stale）
+            buck["rx_iout_limit"] = self.last_rx_iout_limit
+            buck["rx_iout_limit_captured"] = self.rx_iout_limit_captured
+            buck["rx_iout_limit_at"] = self.last_rx_iout_limit_at or 0
+            buck["rx_iout_limit_time"] = self.last_rx_iout_limit_log_time or ""
+            buck["rx_iout_limit_stale"] = bool(self.session_logs_stale)
         # 有线 CP 三态：cp / buck / unknown（时间顺序 + CP 证据优先）
         wstate = self.last_wired_state
         core.setdefault("derived", {})["wired_cp"] = {
