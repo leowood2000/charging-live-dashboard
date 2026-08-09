@@ -627,19 +627,18 @@ function buildGroups(d) {
   // 非无线输入时隐藏“无线策略实时”整组（vout/vrect/iout/EPP 等无线语义节点）
   const src = d.derived && d.derived.input_source;
   const wiredNow = src === "wired" || !!(d.derived && d.derived.wired_online);
-  const visibleNodes = src === "wireless"
-    ? d.nodes
-    : d.nodes.filter(n => n.group !== "无线策略实时");
+  // 极简方案：以下分组只保留在 /api/data 与原始 JSON，主界面不再渲染
+  const HIDDEN_GROUPS = new Set(["芯片与系统", "电荷泵与电池", "电流投票与限流"]);
+  const visibleNodes = (src === "wireless"
+      ? d.nodes
+      : d.nodes.filter(n => n.group !== "无线策略实时"))
+    .filter(n => !HIDDEN_GROUPS.has(n.group));
   const groups = {};
   visibleNodes.forEach(n => { (groups[n.group] ||= []).push(n); });
   const cards = Object.entries(groups).map(([name, nodes]) => {
     const tiles = nodes.map(renderNode).join("");
-    const extra = name === "芯片与系统"
-      ? CHIP_FACTS.map(f =>
-          `<div class="tile"><div class="k">${esc(f[0])}</div><div class="v">${esc(f[1])}</div></div>`).join("")
-      : "";
-    return `<div class="card${name === "芯片与系统" ? " wide" : ""}"><h2>${esc(name)}<span class="tag">${nodes.length} 项</span></h2>` +
-      `<div class="tiles">${tiles}${extra}</div></div>`;
+    return `<div class="card"><h2>${esc(name)}<span class="tag">${nodes.length} 项</span></h2>` +
+      `<div class="tiles">${tiles}</div></div>`;
   });
 
   // 有线输入实时卡：VBUS/IBUS/输入功率 + 测量来源，来源按功率路径切换
@@ -659,19 +658,7 @@ function buildGroups(d) {
       `<div class="tile wide"><div class="k">测量来源<small>wired_input_source</small></div><div class="v" data-wired="src">${wiredTileValue("src", d)}</div></div></div></div>`);
   }
 
-  const battRows = BATTERY_FIELDS.map(([key, ukey, conv, unit, hint, label, wide]) => {
-    const item = d.battery[key] || d.battery[ukey.toLowerCase()];
-    const has = item && item.ok && item.value !== "";
-    let v = `<span class="empty">不可读</span>`;
-    if (has) {
-      const shown = getBatteryShownValue(d, key, item);
-      v = `<span>${esc(shown)}<small>${unit}</small></span>`;
-    }
-    return `<div class="tile${wide ? " wide" : ""}"><div class="k">${label}${hint ? `<small>${hint} · ${ukey}</small>` : `<small>${ukey}</small>`}</div>` +
-      `<div class="v" data-batt="${key}">${v}</div></div>`;
-  }).join("");
-  cards.push(`<div class="card wide"><h2>电池标准属性<span class="tag">battery uevent</span></h2>` +
-    `<div class="tiles batt">${battRows}</div></div>`);
+  // 电池标准属性整卡不渲染（battery uevent 仍完整保留在 /api/data 与原始 JSON）
   $("groups").innerHTML = cards.join("");
 }
 
