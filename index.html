@@ -35,9 +35,9 @@
     background: var(--bg);
     color: var(--text);
     font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    padding: 18px 24px 44px;
+    padding: 14px 20px 32px;
   }
-  header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-bottom: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 12px; }
   h1 { font-size: 20px; margin: 0; letter-spacing: .5px; }
   .sub { color: var(--muted); font-size: 12px; }
   .status {
@@ -64,7 +64,7 @@
 
   .section-title {
     display: flex; align-items: center; gap: 10px;
-    margin: 26px 0 12px; font-size: 15px; font-weight: 600; color: var(--cyan);
+    margin: 18px 0 8px; font-size: 15px; font-weight: 600; color: var(--cyan);
   }
   .section-title::after { content: ""; flex: 1; height: 1px; background: var(--border); }
   .section-title .badge {
@@ -75,24 +75,26 @@
   .kpis {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 12px; margin-bottom: 16px;
+    gap: 8px; margin-bottom: 10px;
   }
   .kpi {
     background: linear-gradient(160deg, rgba(34,211,238,.12), rgba(34,211,238,.02));
     border: 1px solid var(--border); border-radius: 12px;
-    padding: 12px 14px; min-height: 92px;
+    padding: 8px 10px; min-height: 42px;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
   }
-  .kpi .label { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
-  .kpi .value { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kpi .label { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .kpi .reading { white-space: nowrap; }
+  .kpi .value { font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .kpi .unit { font-size: 13px; color: var(--muted); margin-left: 3px; font-weight: 400; }
-  .kpi .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .kpi .hint { display: none; }
 
   .grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     grid-auto-flow: row;
     align-items: stretch;
-    gap: 12px; margin-bottom: 16px;
+    gap: 10px; margin-bottom: 12px;
   }
   .grid > .card {
     min-width: 0;
@@ -102,7 +104,7 @@
   .card {
     background: var(--panel);
     border: 1px solid var(--border); border-radius: 12px;
-    padding: 14px 16px;
+    padding: 12px 14px;
   }
   .card h2 {
     margin: 0 0 10px; font-size: 14px; font-weight: 500;
@@ -150,16 +152,43 @@
   .charts {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px; margin-bottom: 16px;
+    gap: 10px; margin-bottom: 12px;
   }
   #liveSessions { grid-template-columns: 1fr; }
+  #limitSummary { grid-template-columns: 1fr; }
+  #limitSummary .card { padding: 10px; }
+  #limitSummary .chip { display: inline-flex; align-items: baseline; gap: 5px; }
+  #limitSummary .chip b { color: var(--text); }
+  #limitSummary .summary-thermal {
+    border-color: rgba(251,191,36,.45); background: rgba(251,191,36,.06);
+    flex: 0 1 auto; max-width: 100%;
+  }
+  #limitSummary .summary-thermal-active { flex: 0 1 auto; }
+  #limitSummary .summary-thermal b { color: var(--green); }
+  #limitSummary .summary-path {
+    flex: 0 0 auto; border-color: rgba(129,140,248,.55);
+    background: rgba(129,140,248,.08);
+  }
+  #limitSummary .summary-primary {
+    border-color: rgba(34,211,238,.72);
+    background: linear-gradient(135deg, rgba(34,211,238,.14), rgba(34,211,238,.05));
+    box-shadow: inset 3px 0 rgba(34,211,238,.9);
+  }
+  #limitSummary .summary-primary b { color: var(--cyan); }
+  #limitSummary .summary-secondary {
+    border-color: rgba(52,211,153,.38); background: rgba(52,211,153,.045);
+  }
+  #limitSummary .summary-secondary b { color: var(--green); }
+  #limitSummary .summary-break { flex: 0 0 100%; height: 0; }
+  .summary-label { white-space: nowrap; }
+  #groups { grid-template-columns: 1fr; }
   .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
   .chart-card h3 {
     margin: 0 0 6px; font-size: 12px; font-weight: 500; color: var(--muted);
     display: flex; justify-content: space-between; gap: 8px;
   }
   .chart-card h3 span { color: var(--text); font-variant-numeric: tabular-nums; }
-  canvas { width: 100%; height: 120px; display: block; }
+  canvas { width: 100%; height: 110px; display: block; }
 
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -245,11 +274,40 @@
   .vote-chip.on { border-color: rgba(52,211,153,.55); }
   .vote-chip.on .vc-dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
   .vote-chip.on b { color: var(--text); }
-  .vote-chip.changed { border-color: rgba(251,191,36,.7); background: rgba(251,191,36,.08); }
-  .vote-chip.changed b { color: var(--amber); }
+  .vote-chip.changed { border-style: dashed; }
+  .vote-chip.winner { border-color: rgba(251,191,36,.8); background: rgba(251,191,36,.09); }
+  .vote-chip.winner b, .vote-chip.winner i { color: var(--amber); }
   .vote-all { margin-top: 8px; }
   .vote-all summary { cursor: pointer; font-size: 12px; color: var(--muted); }
   .vote-all .vote-chips { margin-top: 6px; }
+
+  .strategy-fold, .section-fold {
+    min-width: 0; padding: 0; overflow: hidden; margin: 0;
+  }
+  .strategy-fold > summary, .section-fold > summary {
+    min-height: 42px; padding: 8px 12px; display: flex; align-items: center;
+    gap: 9px; color: var(--cyan); list-style: none;
+  }
+  .strategy-fold > summary::-webkit-details-marker,
+  .section-fold > summary::-webkit-details-marker { display: none; }
+  .strategy-fold > summary::before, .section-fold > summary::before {
+    content: "›"; color: var(--muted); font-size: 22px; line-height: 1;
+    transition: transform .15s ease;
+  }
+  .strategy-fold[open] > summary::before, .section-fold[open] > summary::before {
+    transform: rotate(90deg);
+  }
+  .fold-title { font-weight: 600; }
+  .fold-peek { color: var(--muted); font-size: 11px; margin-left: auto; text-align: right; }
+  .fold-count {
+    color: var(--muted); font-size: 11px; border: 1px solid var(--border);
+    border-radius: 6px; padding: 1px 6px; white-space: nowrap;
+  }
+  .fold-body { border-top: 1px solid var(--border); padding: 12px 14px 14px; }
+  .session-fold { margin-top: 24px; }
+  .session-fold > summary { flex-wrap: wrap; }
+  #sessionFoldSummary { color: var(--muted); font-size: 11px; margin-left: auto; }
+  .raw-topic { display: block; color: var(--muted); font-size: 10px; font-weight: 400; }
 
   @keyframes flashbg {
     0% { background-color: rgba(52,211,153,.22); }
@@ -257,11 +315,17 @@
   }
   .flash { animation: flashbg .8s ease-out; border-radius: 6px; }
   .empty { color: var(--muted); }
+  #voteTopics > .card { height: auto; align-self: start; }
+  #voteTopics > .card.wide { grid-column: 1 / -1; width: 100%; }
+  #voteTopics > .vote-column {
+    display: flex; flex-direction: column; gap: 10px; min-width: 0;
+  }
+  #voteTopics > .vote-column > .card { height: auto; }
 
   @media (max-width: 900px) {
     body { padding: 14px 14px 36px; }
-    .kpis,
-    #groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #groups { grid-template-columns: 1fr; }
     #voteTopics,
     #liveSessions,
     .charts { grid-template-columns: 1fr; }
@@ -283,7 +347,6 @@
   }
 
   @media (max-width: 320px) {
-    .kpis,
     .grid { grid-template-columns: 1fr; }
   }
 </style>
@@ -291,8 +354,8 @@
 <body>
   <header>
     <div>
-      <h1>K80 Pro 无线充电实时仪表盘</h1>
-      <div class="sub">Redmi K80 Pro · HyperOS · ADB Root 实时监控</div>
+      <h1>K80 Pro 充电实时仪表盘</h1>
+      <div class="sub">无线 / 有线自动识别 · HyperOS · KernelSU root</div>
     </div>
     <span class="status" id="statusBadge"><span class="dot" id="statusDot"></span><span id="statusText">连接中…</span></span>
     <div class="spacer"></div>
@@ -305,37 +368,45 @@
 
   <div class="banner" id="offlineBanner"></div>
 
-  <div class="section-title">实时数据 <span class="badge">每 3 秒刷新</span></div>
+  <div class="section-title">实时数据 <span class="badge" id="fastRefreshBadge">每 3 秒刷新</span></div>
   <section class="kpis" id="kpis" aria-label="关键指标"></section>
+
+  <div class="section-title">当前限制 <span class="badge">电池 · 输入 · 温度</span></div>
+  <section class="grid" id="limitSummary" aria-label="当前限制因素"></section>
+
   <section class="grid" id="groups" aria-label="充电实时数据"></section>
   <section class="charts" id="charts" aria-label="实时曲线">
     <div class="chart-card">
-      <h3>输入功率 (W) <span id="chart-input-power">-</span>
-        <small id="chart-input-source" class="badge"></small></h3>
-      <canvas id="cv-input-power" role="img" aria-label="输入功率曲线"></canvas>
-    </div>
-    <div class="chart-card">
       <h3>电池电流 (mA) <span id="chart-batt-current">-</span></h3>
       <canvas id="cv-batt-current" role="img" aria-label="电池电流曲线"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>输入电流 (mA) <span id="chart-iout">-</span></h3>
+      <canvas id="cv-iout" role="img" aria-label="输入电流曲线"></canvas>
     </div>
     <div class="chart-card">
       <h3>输入电压 (V) <span id="chart-vout">-</span></h3>
       <canvas id="cv-vout" role="img" aria-label="输入电压曲线"></canvas>
     </div>
     <div class="chart-card">
-      <h3>输入电流 (mA) <span id="chart-iout">-</span></h3>
-      <canvas id="cv-iout" role="img" aria-label="输入电流曲线"></canvas>
+      <h3>输入功率 (W) <span id="chart-input-power">-</span>
+        <small id="chart-input-source" class="badge"></small></h3>
+      <canvas id="cv-input-power" role="img" aria-label="输入功率曲线"></canvas>
     </div>
   </section>
 
-  <div class="section-title">电流投票实时表 <span class="badge">生效主题 · 10 秒刷新</span>
+  <div class="section-title">电流投票实时表 <span class="badge" id="voteRefreshBadge">生效主题 · 10 秒刷新</span>
     <span id="voteLogsAge" class="badge" style="display:none"></span>
     <span id="logsStaleBadge" class="badge" style="display:none;color:var(--amber);border-color:rgba(251,191,36,.5)">日志读取失败 · 显示上次成功数据</span>
   </div>
   <section class="grid" id="voteTopics" aria-label="电流投票实时表"></section>
 
-  <div class="section-title">实时会话档案 <span class="badge">mca_log 最近会话 · 10 秒刷新</span></div>
-  <section class="grid" id="liveSessions" aria-label="实时会话档案"></section>
+  <details class="section-fold session-fold" id="sessionDetails">
+    <summary><span class="fold-title">实时会话档案</span>
+      <span class="fold-count" id="sessionRefreshBadge">10 秒刷新</span>
+      <span id="sessionFoldSummary">等待会话数据</span></summary>
+    <div class="fold-body"><section class="grid" id="liveSessions" aria-label="实时会话档案"></section></div>
+  </details>
 
   <details id="rawDetails">
     <summary>原始数据 JSON（所有节点完整输出）</summary>
@@ -374,10 +445,10 @@ let lastGroupsStruct = "";
 const KPI = [
   { id: "input_power_w", label: "输入功率", unit: "W", digits: 2, hint: "当前输入 VBUS × IBUS（有线/无线自动切换）" },
   { id: "battery_power_w", label: "电池功率", unit: "W", digits: 2, hint: "正值为充电，负值为放电" },
-  { id: "batt_current_ma", label: "电池电流", unit: "mA", digits: 0, hint: "充电为正，放电为负" },
-  { id: "batt_voltage_mv", label: "电池电压", unit: "mV", digits: 0, hint: "单电芯实测电压" },
+  { id: "batt_current_ma", label: "电池电流", unit: "mA", digits: 0, signed: true, hint: "充电为正，放电为负" },
+  { id: "batt_voltage_mv", label: "电池电压", unit: "V", digits: 3, scale: v => v / 1000, hint: "单电芯实测电压" },
+  { id: "temp_c", label: "电池温度", unit: "°C", digits: 1, hint: "battery uevent；电芯实体温度" },
   { id: "capacity", label: "电量 SOC", unit: "%", digits: 1, hint: "battery uevent" },
-  { id: "temp_c", label: "电池温度", unit: "°C", digits: 1, hint: "battery uevent" },
 ];
 
 const BATTERY_FIELDS = [
@@ -444,15 +515,16 @@ function renderOffline(data) {
   const banner = $("offlineBanner");
   banner.classList.add("show");
   banner.textContent = "采集失败：" + (data.error || "未知错误") +
-    "。当前不显示任何伪造数据，请确认 server.py 正在运行并且 ADB 设备在线。";
+    "。当前不显示任何伪造数据，请确认已在 KernelSU/Magisk 中授权后重新打开。";
   $("metaDevice").textContent = data.meta && data.meta.adb ? data.meta.adb : "-";
   $("metaInterval").textContent = data.meta ? data.meta.interval : "3";
   $("metaVersion").textContent = (data.meta && data.meta.version) || "-";
   $("lastUpdate").textContent = data.iso || "-";
 
   $("kpis").innerHTML = KPI.map(k =>
-    `<div class="kpi"><div class="label">${k.label}</div><div class="value empty">--</div></div>`).join("");
+    `<div class="kpi"><span class="label">${k.label}</span><span class="reading"><b class="value empty">--</b></span></div>`).join("");
   $("groups").innerHTML = "";
+  $("limitSummary").innerHTML = "";
   lastGroupsStruct = "";
   $("voteTopics").innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">离线</span></h2>` +
     `<p class="note">设备离线，暂无投票数据。</p></div>`;
@@ -465,15 +537,16 @@ function renderOffline(data) {
   $("rawJson").textContent = JSON.stringify(data, null, 2);
 }
 
-function renderKpis(d) {
+function renderKpis(d, thermal = {}) {
   const html = KPI.map(k => {
-    const v = d[k.id];
+    const v = k.source === "thermal" ? thermal[k.id] : d[k.id];
     const has = v !== null && v !== undefined && !Number.isNaN(v);
     const hint = k.id === "input_power_w" ? inputSourceHint(d) : k.hint;
-    return `<div class="kpi"><div class="label">${k.label}</div>` +
-      `<div class="value" id="kpi-${k.id}">${has ? fmt(v, k.digits) : "--"}</div>` +
-      `<span class="unit">${has ? k.unit : ""}</span>` +
-      `<div class="hint">${hint}</div></div>`;
+    const shown = has ? (k.scale ? k.scale(v) : v) : null;
+    const value = has ? `${k.signed && shown > 0 ? "+" : ""}${fmt(shown, k.digits)}` : "--";
+    return `<div class="kpi" title="${esc(hint)}"><span class="label">${k.label}</span>` +
+      `<span class="reading"><b class="value" id="kpi-${k.id}">${value}</b>` +
+      `<span class="unit">${has ? k.unit : ""}</span></span></div>`;
   }).join("");
   $("kpis").innerHTML = html;
   KPI.forEach(k => flash("kpi-" + k.id, d[k.id]));
@@ -571,6 +644,15 @@ function renderGroups(d) {
         ? ` · ${tel.wired_input_age}s前` : "";
       tagEl.textContent = `${srcText(tel.wired_input_source)}${waitTip}${ageTip}${staleTip}`;
     }
+    const der = d.derived || {};
+    const wirelessPeek = $("wirelessStrategyPeek");
+    if (wirelessPeek) {
+      wirelessPeek.textContent = der.input_source === "wireless"
+        ? `${fmt((der.input_voltage_mv || 0) / 1000, 2)}V · ${fmt(der.input_current_ma, 0)}mA`
+        : "当前未使用";
+    }
+    const wiredPeek = $("wiredStrategyPeek");
+    if (wiredPeek) wiredPeek.textContent = der.input_source === "wired" ? "当前有线输入" : "当前未使用";
   }
 }
 
@@ -624,21 +706,33 @@ function getBatteryShownValue(d, key, item) {
 }
 
 function buildGroups(d) {
-  // 非无线输入时隐藏“无线策略实时”整组（vout/vrect/iout/EPP 等无线语义节点）
   const src = d.derived && d.derived.input_source;
   const wiredNow = src === "wired" || !!(d.derived && d.derived.wired_online);
   // 极简方案：以下分组只保留在 /api/data 与原始 JSON，主界面不再渲染
   const HIDDEN_GROUPS = new Set(["芯片与系统", "电荷泵与电池", "电流投票与限流"]);
-  const visibleNodes = (src === "wireless"
-      ? d.nodes
-      : d.nodes.filter(n => n.group !== "无线策略实时"))
-    .filter(n => !HIDDEN_GROUPS.has(n.group));
+  const visibleNodes = d.nodes.filter(n => !HIDDEN_GROUPS.has(n.group));
   const groups = {};
   visibleNodes.forEach(n => { (groups[n.group] ||= []).push(n); });
   const cards = Object.entries(groups).map(([name, nodes]) => {
     const tiles = nodes.map(renderNode).join("");
-    return `<div class="card"><h2>${esc(name)}<span class="tag">${nodes.length} 项</span></h2>` +
-      `<div class="tiles">${tiles}</div></div>`;
+    const title = name === "私有快充协商" ? "私有快充协议" : name;
+    let peek = `${nodes.length} 项`;
+    if (name === "无线策略实时") {
+      const v = d.derived || {};
+      peek = src === "wireless"
+        ? `${fmt((v.input_voltage_mv || 0) / 1000, 2)}V · ${fmt(v.input_current_ma, 0)}mA`
+        : "当前未使用";
+    } else if (name === "有线策略实时") {
+      peek = wiredNow ? "当前有线输入" : "当前未使用";
+    } else if (name === "私有快充协商") {
+      const rt = nodes.find(n => n.id === "real_type");
+      peek = rt && rt.value ? String(rt.value) : "待识别";
+    }
+    const peekId = name === "无线策略实时" ? ' id="wirelessStrategyPeek"'
+      : name === "有线策略实时" ? ' id="wiredStrategyPeek"' : "";
+    return `<details class="strategy-fold"><summary><span class="fold-title">${esc(title)}</span>` +
+      `<span class="fold-peek"${peekId}>${esc(peek)}</span><span class="fold-count">${nodes.length} 项</span></summary>` +
+      `<div class="fold-body"><div class="tiles">${tiles}</div></div></details>`;
   });
 
   // 有线输入实时卡：VBUS/IBUS/输入功率 + 测量来源，来源按功率路径切换
@@ -650,23 +744,46 @@ function buildGroups(d) {
       && tel.wired_input_source !== "usb_uevent"
       && tel.wired_input_age !== null && tel.wired_input_age !== undefined
       ? ` · ${tel.wired_input_age}s前` : "";
-    cards.unshift(`<div class="card"><h2>有线输入实时<span class="tag" id="wiredInputTag">${esc(srcText(tel.wired_input_source))}${waitTip}${ageTip}${staleTip}</span></h2>` +
-      `<div class="tiles"><div class="tile"><div class="k">有线输入电压<small>VBUS</small></div><div class="v" data-wired="vbus">${wiredTileValue("vbus", d)}</div></div>` +
+    cards.unshift(`<details class="strategy-fold"><summary><span class="fold-title">有线输入实时</span>` +
+      `<span class="fold-peek" id="wiredInputTag">${esc(srcText(tel.wired_input_source))}${waitTip}${ageTip}${staleTip}</span>` +
+      `<span class="fold-count">当前路径</span></summary><div class="fold-body"><div class="tiles">` +
+      `<div class="tile"><div class="k">有线输入电压<small>VBUS</small></div><div class="v" data-wired="vbus">${wiredTileValue("vbus", d)}</div></div>` +
       `<div class="tile"><div class="k">有线输入电流<small>IBUS</small></div><div class="v" data-wired="ibus">${wiredTileValue("ibus", d)}</div></div>` +
       `<div class="tile"><div class="k">有线输入功率<small>VBUS×IBUS</small></div><div class="v" data-wired="power">${wiredTileValue("power", d)}</div></div>` +
       `<div class="tile wide"><div class="k">遥测校验<small>策略日志 ibus · ${esc(tel.wired_tel_source ? srcText(tel.wired_tel_source) : "-")}</small></div><div class="v" data-wired="tel">${wiredTelValue(d)}</div></div>` +
-      `<div class="tile wide"><div class="k">测量来源<small>wired_input_source</small></div><div class="v" data-wired="src">${wiredTileValue("src", d)}</div></div></div></div>`);
+      `<div class="tile wide"><div class="k">测量来源<small>wired_input_source</small></div><div class="v" data-wired="src">${wiredTileValue("src", d)}</div></div>` +
+      `</div></div></details>`);
   }
 
   // 电池标准属性整卡不渲染（battery uevent 仍完整保留在 /api/data 与原始 JSON）
   $("groups").innerHTML = cards.join("");
 }
 
+function updateLimitLive(d) {
+  const set = (id, value) => { const el = $(id); if (el) el.textContent = value; };
+  const der = d.derived || {};
+  const th = d.thermal || {};
+  if (Number.isFinite(Number(der.batt_current_ma))) {
+    const v = Number(der.batt_current_ma);
+    set("limitBattCurrent", `${v > 0 ? "+" : ""}${fmt(v, 0)}mA`);
+  }
+  if (Number.isFinite(Number(der.iout))) set("limitRxCurrent", `${fmt(der.iout, 0)}mA`);
+  if (Number.isFinite(Number(th.virtual_temp))) set("limitVirtualTemp", `${fmt(th.virtual_temp, 1)}°C`);
+  if (th.scene) set("limitThermalScene", th.scene);
+}
+
 function renderVoters(d) {
   const el = $("voteTopics");
+  const wideVoteLayout = window.matchMedia("(min-width: 901px)").matches;
   const topics = d.voters || {};
   const keys = Object.keys(topics);
   if (!keys.length) {
+    const th = d.thermal || {};
+    $("limitSummary").innerHTML = `<div class="card wide"><div class="chips" style="justify-content:flex-start">` +
+      `<span class="chip summary-thermal"><span class="summary-label">温度与热控</span><b>虚拟 <span id="limitVirtualTemp">${fmt(th.virtual_temp, 1)}°C</span></b>` +
+      `<small>投票待加载</small></span>` +
+      `<span class="chip"><span class="summary-label">当前热控场景</span><b id="limitThermalScene">${esc(th.scene || "--")}</b><small>mi_thermald</small></span>` +
+      `</div></div>`;
     el.innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">最近日志</span></h2>` +
       `<p class="note">日志中暂无投票表输出。</p></div>`;
     return;
@@ -697,7 +814,7 @@ function renderVoters(d) {
   const wirelessCharging = chargingNow && wirelessActive;
   const wiredCharging = chargingNow && (
     inputSrc === "wired" || !!(d.derived && d.derived.wired_online));
-  // 日志数据年龄：投票/仲裁来自 10 秒日志周期，可能与 3 秒实时 KPI 短暂不一致
+  // 日志数据年龄：投票/仲裁来自低频日志周期，可能与快速 KPI 短暂不一致
   const logsAge = d.meta && d.meta.logs_updated_at
     ? Math.max(0, Math.round((Date.now() - d.meta.logs_updated_at) / 1000)) : null;
   const ageEl = $("voteLogsAge");
@@ -709,6 +826,26 @@ function renderVoters(d) {
       ageEl.style.display = "none";
     }
   }
+  // 投票树只随慢速日志/充电路径变化；快速采样期间仅增量更新实际电池电流，
+  // 避免每次快速快照都重建整块投票 DOM。
+  const votersSignature = JSON.stringify({
+    topics,
+    inputSrc,
+    battSt,
+    wiredCp: d.derived && d.derived.wired_cp,
+    logsAt: d.meta && d.meta.logs_updated_at,
+    wideVoteLayout,
+  });
+  if (votersSignature === lastVotersJson) {
+    const ibat = d.derived && d.derived.batt_current_ma;
+    const ibatEl = $("quickActualIbat");
+    if (ibatEl && ibat !== null && ibat !== undefined) {
+      ibatEl.textContent = fmt(ibat, 0);
+    }
+    updateLimitLive(d);
+    return;
+  }
+  lastVotersJson = votersSignature;
   // 只显示与当前连接/状态相关的投票主题：有启用票，或驱动已给出实际投票结果
   const relevant = keys.filter(t => {
     if (isDeviceModelTable(t) || isProtocolTable(t) || isStaticParam(t)) return false;
@@ -746,24 +883,21 @@ function renderVoters(d) {
   const hasJeita = (jeitaVolt || jeitaCurr) && [jeitaVolt, jeitaCurr].some(b =>
     b && ((b.rows || []).some(r => r.enable === 1)
         || (b.result && b.result.client && b.result.client !== "(null)")));
-  if (!relevant.length && !hasJeita) {
-    el.innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">生效主题</span></h2>` +
-      `<p class="note">当前无生效的投票主题（无线/有线未连接或全部票已撤）。</p></div>`;
-    return;
-  }
+  const noRelevant = !relevant.length && !hasJeita;
 
   // 结果是否仍有效：拔电/撤票后（该主题无启用票）旧 effective 行不再展示
   const resultValid = b => !!b.result
     && (!(b.rows && b.rows.length) || (b.rows || []).some(r => r.enable === 1));
 
-  const chipHtml = b => (b.rows || []).map(r => {
+  const rowChip = (b, r, inactive = false) => {
     const changed = b.changed && b.changed.client === r.client;
-    const cls = `vote-chip ${r.enable ? "on" : "off"}${changed ? " changed" : ""}`;
+    const winner = resultValid(b) && b.result.client === r.client;
+    const cls = `vote-chip ${r.enable ? "on" : "off"}${winner ? " winner" : ""}${changed && !winner ? " changed" : ""}`;
     const unit = b.unit || "";
     return `<span class="${cls}" title="${esc(r.client)}：生效=${r.enable}，值=${r.value}${unit}">` +
       `<span class="vc-dot"></span><b>${esc(r.client)}</b><i>${r.value}</i>` +
       `${unit ? `<small>${unit}</small>` : ""}</span>`;
-  }).join("");
+  };
 
   const effectiveOf = b => {
     if (!b) return null;
@@ -798,18 +932,24 @@ function renderVoters(d) {
           : buck.cp_ratio + ":1")
       : "";
     const cpState = buck && buck.cp_state;
+    const cpSource = buck && buck.cp_state_source;
     let pathLabel;
     if (cpState === "cp") {
-      pathLabel = `电荷泵（Quick Wireless）${ratio ? " · " + ratio : ""}`;
+      pathLabel = `CP${ratio ? " · " + ratio : ""}`;
     } else if (cpState === "buck") {
-      pathLabel = "Buck 直充（无线）";
+      pathLabel = "Buck";
     } else {
-      pathLabel = "Buck / CP 未激活（待确认）";
+      pathLabel = "待确认";
     }
-    const ppStaleW = d.meta && d.meta.power_path_logs_stale;
+    const livePath = cpSource === "sysfs_cp_ibus_total";
+    const sourceW = livePath
+      ? `实时 CP 总线 ${fmt(buck.cp_ibus_total_ma, 0)}mA`
+      : cpSource === "quick_wireless_work_mode" ? "Quick Wireless work_mode"
+      : cpSource === "sc8581_operation_mode" ? "SC8581 operation mode" : "";
+    const ppStaleW = !livePath && d.meta && d.meta.power_path_logs_stale;
     const staleW = ppStaleW
       ? (cpState === "unknown" ? " · 路径日志读取异常" : " · 数据暂时陈旧") : "";
-    summary.push(`<span class="chip" title="由电荷泵 operation mode/work_mode 判定（内核日志符号 sc8581，OSS 设备树节点 SC8585）${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(pathLabel)}</b><small>${staleW}</small></span>`);
+    summary.push(`<span class="chip" title="活跃无线充电时优先按实时 mca_platform_cp/ibus_total 判定；空闲时回退 operation mode/work_mode${sourceW ? " · " + esc(sourceW) : ""}${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(pathLabel)}</b>${staleW ? `<small>${esc(staleW.replace(/^ · /, ""))}</small>` : ""}</span>`);
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;
@@ -837,16 +977,16 @@ function renderVoters(d) {
       let wPath;
       let staleD = "";
       if (wcp.state === "cp") {
-        wPath = `电荷泵（有线）${wcp.ratio ? " · " + wcp.ratio + ":1" : ""}`;
+        wPath = `CP${wcp.ratio ? " · " + wcp.ratio + ":1" : ""}`;
         if (ppStaleD) staleD = " · 数据暂时陈旧";
       } else if (wcp.state === "buck") {
-        wPath = "Buck 直充（有线）";
+        wPath = "Buck";
         if (ppStaleD) staleD = " · 数据暂时陈旧";
       } else {
-        wPath = "有线功率路径待确认";
+        wPath = "待确认";
         if (ppStaleD) staleD = " · 路径日志读取异常";
       }
-      summary.push(`<span class="chip" title="有线 CP 状态：电荷泵 operation mode + quickchg work_mode/ratio + cur_work_cp（内核日志符号 sc8581，设备树 SC8585）${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">当前功率路径<b>${esc(wPath)}</b><small>${staleD}</small></span>`);
+      summary.push(`<span class="chip" title="有线 CP 状态：电荷泵 operation mode + quickchg work_mode/ratio + cur_work_cp（内核日志符号 sc8581，设备树 SC8585）${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(wPath)}</b>${staleD ? `<small>${esc(staleD.replace(/^ · /, ""))}</small>` : ""}</span>`);
       if (wcp.state === "cp") {
         // 有线 CP：Quick Charge 算法目标（1611 型 cur_max 优先，1597 型阶段值兜底），绝不用 buck_charge_curr 顶替
         if (!ceStopped) {
@@ -910,7 +1050,7 @@ function renderVoters(d) {
           }
         }
         if (battMa !== null && battMa !== undefined) {
-          summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b>${fmt(Math.abs(battMa), 0)}</b><small>battery</small></span>`);
+          summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b id="limitBattCurrent">${battMa > 0 ? "+" : ""}${fmt(battMa, 0)}mA</b><small>battery</small></span>`);
         }
       } else {
         // 有线 Buck / 待确认：USB 输入侧 ICL + 电池侧 FCC
@@ -919,20 +1059,20 @@ function renderVoters(d) {
       }
     } else if (wirelessActive) {
       // 无线协议控制域（前级）与后级 Buck/CP 路径是独立维度：
-      // 总仲裁只放“真正参与当前充电控制/最终限制的结果”：
+      // 当前限制先展示控制/限制结果，再紧邻对应的实测值：
       // 上游无线平台输入 ICL：wireless_buck_input effective → ADSP 0x1003；
       // EPP+/QC 下与 RX iout 的映射未闭环，不直接比较；
       // soc_limit 为 effective winner + SmartEndura 上下文 + ibat≈0 时标记“当前上游限制”；
-      // RX 输出上限 / 实测 RX 输出 / 控制模式 / 连接类型移入详情卡（链路能力/遥测信息）。
+      // 实测 RX 输出在总览与 ICL 配对展示；RX 允许上限 / 控制模式 / 连接类型留在详情卡。
       const wbiEff = effectiveOf(buck);
       if (wbiEff) {
         const smartStop = wbiEff.client === "soc_limit"
           && !!buck && buck.smartendura_soc_limit === true
           && battMa !== null && battMa !== undefined && Math.abs(battMa) <= 300;
         summary.push(`<span class="chip" title="wireless_buck_input effective → strategy_wireless_set_input_curr_limit → ADSP prop 0x1003（上游无线平台输入 ICL）；EPP+/QC 下与 RX iout 的映射未闭环证明，不做数值一致性比较${smartStop ? "；SmartEndura/soc_limit 停充上下文，当前上游限制" : ""}">` +
-          `无线平台输入 ICL<b>${fmt(wbiEff.value, 0)}</b><small>${esc(wbiEff.client)} · ADSP 0x1003${smartStop ? " · 当前上游限制" : " · 上游策略"}</small></span>`);
+          `无线输入 ICL<b>${fmt(wbiEff.value, 0)}mA</b>${smartStop ? "<small>当前瓶颈</small>" : ""}</span>`);
       } else {
-        summary.push(`<span class="chip" title="wireless_buck_input effective 未捕获">无线平台输入 ICL<b>--</b><small>待捕获</small></span>`);
+        summary.push(`<span class="chip" title="wireless_buck_input effective 未捕获">无线输入 ICL<b>--</b><small>待捕获</small></span>`);
       }
       // 无线路径：电池侧 ceiling 按当前功率路径选择——
       // CP 生效 → quick wireless cur_max:[Final]（算法决策，允许上限，带年龄）
@@ -957,7 +1097,12 @@ function renderVoters(d) {
         // 与本轮 sw_thermal_ichg 不等价（已有真机证据），热控输入在
         // “Quick Wireless 电池电流决策”卡内看 sw_thermal_ichg。
       } else if (wCpState === "buck") {
-        addSummary("当前电池充电电流上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+        const buckFcc = effectiveOf(topics.buck_charge_curr);
+        if (buckFcc) {
+          addSummary("当前电池充电电流上限", buckFcc, v => `${v}mA`);
+        } else {
+          summary.push(`<span class="chip" title="Buck 路径已确认，但尚未捕获 buck_charge_curr effective">当前电池充电电流上限<b>--</b><small>待捕获</small></span>`);
+        }
         // 无线热控上限（Buck）：直接取 buck_charge_curr 中唯一启用的 wireless_thermal_XXw
         const wThermalRowsB = (topics.buck_charge_curr && topics.buck_charge_curr.rows || [])
           .filter(r => /^wireless_thermal_(20|30|50|80)w$/.test(r.client) && r.enable === 1 && r.value > 0);
@@ -973,6 +1118,12 @@ function renderVoters(d) {
       } else {
         summary.push(`<span class="chip" title="无线功率路径尚未确认，不拿 Buck 路径 FCC 冒充当前上限">当前电池充电电流上限<b>--</b><small>路径待确认</small></span>`);
       }
+      if (battMa !== null && battMa !== undefined) {
+        summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b id="limitBattCurrent">${battMa > 0 ? "+" : ""}${fmt(battMa, 0)}mA</b><small>battery</small></span>`);
+      }
+      if (ioutNow !== null) {
+        summary.push(`<span class="chip" title="wls_debug 实时 RX 输出电流">实际 RX 输出<b id="limitRxCurrent">${fmt(ioutNow, 0)}mA</b><small>wls_debug</small></span>`);
+      }
     }
     addSummary("充电使能", ceEff, v => (v === 1 ? "ON" : "OFF"));
     if (ceStopping) {
@@ -987,29 +1138,74 @@ function renderVoters(d) {
     }
   }
   const th = d.thermal || {};
-  if (th.scene) {
-    summary.push(`<span class="chip" title="mi_thermald 当前加载的 thermal 场景">生效场景<b>${esc(th.scene)}</b></span>`);
+  const thermalVotes = [];
+  Object.entries(topics).forEach(([topic, block]) => {
+    (block.rows || []).filter(r => r.enable === 1 && /thermal|jeita/i.test(r.client))
+      .forEach(r => thermalVotes.push({ topic, row: r,
+        winner: resultValid(block) && block.result.client === r.client }));
+  });
+  const thermalWinner = thermalVotes.find(v => v.winner);
+  const thermalCandidate = thermalWinner || thermalVotes[0];
+  const decThermal = buck && buck.cur_max_decision && buck.cur_max_decision.sw_thermal_ichg;
+  let thermalEvidence = chargingNow ? "未检测到生效温控票" : "";
+  if (chargingNow && thermalCandidate) {
+    thermalEvidence = `${thermalCandidate.winner ? "限制" : "生效票"} ${thermalCandidate.row.client} ${thermalCandidate.row.value}${topics[thermalCandidate.topic].unit || ""}`;
+  } else if (chargingNow && decThermal !== null && decThermal !== undefined) {
+    thermalEvidence = `Quick Wireless 温控输入 ${decThermal}mA`;
   }
-  if (th.virtual_temp !== null && th.virtual_temp !== undefined) {
-    summary.push(`<span class="chip" title="VIRTUAL-SENSOR-FORMULA 加权虚拟温度（无线热控判据）">虚拟温度<b>${fmt(th.virtual_temp, 1)}</b><small>°C</small></span>`);
-  }
-  if (d.derived && d.derived.temp_c !== null && d.derived.temp_c !== undefined) {
-    summary.push(`<span class="chip">电池温度<b>${fmt(d.derived.temp_c, 1)}</b><small>°C</small></span>`);
-  }
-  const summaryCard = summary.length
-    ? `<div class="card wide"><h2>总仲裁结果<span class="tag">汇总</span></h2>` +
-      `<div class="chips" style="justify-content:flex-start">${summary.join("")}</div></div>`
+  summary.push(`<span class="chip summary-thermal${chargingNow ? " summary-thermal-active" : ""}" title="虚拟温度来自 VIRTUAL-SENSOR-FORMULA，是当前热控决策主温度；电池实体温度在实时数据区单独展示">` +
+    `<span class="summary-label">温度与热控</span><b>虚拟 <span id="limitVirtualTemp">${fmt(th.virtual_temp, 1)}°C</span></b>` +
+    `${thermalEvidence ? `<small>${esc(thermalEvidence)}</small>` : ""}</span>`);
+  summary.push(`<span class="chip" title="mi_thermald 当前命中的热控配置场景">` +
+    `<span class="summary-label">当前热控场景</span><b id="limitThermalScene">${esc(th.scene || "--")}</b>` +
+    `<small>mi_thermald</small></span>`);
+
+  const summaryRank = html => {
+    if (/充电路径|当前功率路径/.test(html)) return 0;
+    if (/当前电池充电电流上限|电池充电上限|综合有效上限|Quick Charge 算法目标/.test(html)) return 10;
+    if (/实际电池电流/.test(html)) return 20;
+    if (/无线(?:平台)?输入 ICL|有线输入限流/.test(html)) return 30;
+    if (/实际 RX 输出|实际输入电流/.test(html)) return 40;
+    if (/温度与热控|无线热控上限/.test(html)) return 50;
+    if (/当前热控场景/.test(html)) return 55;
+    if (/充电使能|充电状态/.test(html)) return 60;
+    return 80;
+  };
+  const decorateSummary = html => {
+    let cls = "";
+    if (/充电路径|当前功率路径/.test(html)) cls = "summary-path";
+    else if (/无线(?:平台)?输入 ICL|有线输入限流/.test(html)) cls = "summary-primary summary-input-limit";
+    else if (/当前电池充电电流上限|电池充电上限|综合有效上限|Quick Charge 算法目标/.test(html)) cls = "summary-primary";
+    else if (/实际 RX 输出|实际输入电流/.test(html)) cls = "summary-secondary summary-input-actual";
+    else if (/实际电池电流/.test(html)) cls = "summary-secondary summary-battery-actual";
+    return cls ? html.replace('class="chip', `class="chip ${cls}`) : html;
+  };
+  const orderedSummary = summary.map(decorateSummary)
+    .sort((a, b) => summaryRank(a) - summaryRank(b));
+  const hasInputActual = orderedSummary.some(html => html.includes("summary-input-actual"));
+  const renderSummaryItem = html => {
+    const before = html.includes("summary-input-limit") ? `<span class="summary-break"></span>` : "";
+    const endOfPair = html.includes("summary-battery-actual") || html.includes("summary-input-actual") ||
+      (html.includes("summary-input-limit") && !hasInputActual);
+    const after = html.includes("summary-path") || endOfPair ? `<span class="summary-break"></span>` : "";
+    return `${before}${html}${after}`;
+  };
+  const summaryCard = orderedSummary.length
+    ? `<div class="card wide"><div class="chips" style="justify-content:flex-start">${orderedSummary.map(renderSummaryItem).join("")}</div></div>`
     : "";
 
-  const order = ["wireless_buck_input", "buck_charge_curr", "chg_enable",
-                 "quick_chg_disable", "wls_quick_chg_disable"];
+  const order = ["buck_charge_curr", "wireless_buck_input", "chg_enable",
+                 "wls_quick_chg_disable", "quick_chg_disable", "smartchg_delta_ichg"];
   const sorted = order.filter(t => relevant.includes(t))
     .concat(relevant.filter(t => !order.includes(t)));
   const cards = sorted.map(t => {
     const b = topics[t];
     const rows = b.rows || [];
-    const active = rows.filter(r => r.enable === 1).length;
-    const chips = chipHtml(b);
+    const activeRows = rows.filter(r => r.enable === 1);
+    const inactiveRows = rows.filter(r => r.enable !== 1);
+    const active = activeRows.length;
+    const chips = activeRows.map(r => rowChip(b, r)).join("");
+    const inactiveChips = inactiveRows.map(r => rowChip(b, r, true)).join("");
     const changedText = b.changed
       ? ` · 最近变动 ${esc(b.changed.client)} ${b.changed.enabled ? "on" : "off"} → ${b.changed.value}${b.changed.time ? " @ " + b.changed.time : ""}`
       : "";
@@ -1074,10 +1270,23 @@ function renderVoters(d) {
     if (t === "buck_charge_curr" && wirelessActive && buck && buck.cp_state === "cp") {
       buckPathNote = `<span class="vote-result" title="mca_buckchg_jeita / buck_fcc 是 Buck 充电器路径自己的 FCC；当前 CP 路径采用 quick wireless cur_max:[Final]">Buck 路径 FCC · 当前 CP 路径不采用</span>`;
     }
-    return `<div class="card"><h2>${esc(t)}<span class="tag">${active}/${rows.length} 票</span></h2>` +
+    const topicLabels = {
+      buck_charge_curr: "电池充电上限",
+      wireless_buck_input: "无线输入限制",
+      chg_enable: "充电使能",
+      wls_quick_chg_disable: "无线快充保护",
+      quick_chg_disable: "有线快充保护",
+      smartchg_delta_ichg: "SmartCharge 电流修正",
+    };
+    const title = topicLabels[t] || t;
+    const rawTitle = topicLabels[t] ? `<small class="raw-topic">${esc(t)}</small>` : "";
+    const inactive = inactiveRows.length
+      ? `<details class="vote-all"><summary>未生效票 ${inactiveRows.length} 项</summary>` +
+        `<div class="vote-chips">${inactiveChips}</div></details>` : "";
+    return `<div class="card"><h2><span>${esc(title)}${rawTitle}</span><span class="tag">${active}/${rows.length} 票生效</span></h2>` +
       `<div class="vote-head"><small>本地时间 ${esc(b.time || "-")}${changedText}</small>${resultText}${iclText}${ioutText}${modeText}${buckPathNote}</div>` +
-      `<div class="vote-chips">${chips}</div></div>`;
-  }).join("");
+      `<div class="vote-chips">${chips}</div>${inactive}</div>`;
+  });
   // JEITA 终止参数是温度档决定的静态常数，合并为一张卡
   let jeitaCard = "";
   if (hasJeita) {
@@ -1085,11 +1294,13 @@ function renderVoters(d) {
       (jeitaVolt.rows && jeitaVolt.rows[0] ? jeitaVolt.rows[0].value : null));
     const jc = jeitaCurr && (jeitaCurr.result ? jeitaCurr.result.value :
       (jeitaCurr.rows && jeitaCurr.rows[0] ? jeitaCurr.rows[0].value : null));
-    jeitaCard = `<div class="card"><h2>JEITA 终止参数<span class="tag">静态常数</span></h2>` +
-      `<div class="vote-head"><small>由 JEITA 温度档决定，会话内基本不变，非实时仲裁结果</small>` +
+    jeitaCard = `<details class="section-fold"><summary><span class="fold-title">JEITA 终止参数</span>` +
+      `<span class="fold-peek">${jv === null || jv === undefined ? "-" : jv}mV · ${jc === null || jc === undefined ? "-" : jc}mA</span>` +
+      `<span class="fold-count">静态常数</span></summary><div class="fold-body"><div class="vote-head">` +
+      `<small>由 JEITA 温度档决定，会话内基本不变，非实时仲裁结果</small>` +
       `<span class="vote-result">终止电压 <b>${jv === null || jv === undefined ? "-" : jv}</b><small>mV</small></span>` +
       `<span class="vote-result">终止电流 <b>${jc === null || jc === undefined ? "-" : jc}</b><small>mA</small></span></div>` +
-      `<div class="vote-chips"></div></div>`;
+      `</div></details>`;
   }
   // Quick Wireless 电池电流决策：算法聚合（非 MCA votable），仅无线路径展示
   let quickCard = "";
@@ -1103,31 +1314,55 @@ function renderVoters(d) {
       ["sw_thermal_ichg", dec.sw_thermal_ichg],
     ].filter(r => r[1] !== null && r[1] !== undefined);
     const minVal = inputs.length ? Math.min(...inputs.map(r => r[1])) : null;
-    const chips = inputs.map(([k, v]) =>
+    const bottlenecks = inputs.filter(([, v]) => v === minVal);
+    const otherInputs = inputs.filter(([, v]) => v !== minVal);
+    const chips = bottlenecks.map(([k, v]) =>
       `<span class="vote-chip ${v === minVal ? "on" : "off"}" title="${k}${v === minVal ? "（当前瓶颈）" : ""}">` +
       `<span class="vc-dot"></span><b>${k}</b><i>${v}</i><small>mA</small></span>`).join("");
+    const otherChips = otherInputs.map(([k, v]) =>
+      `<span class="vote-chip off" title="${k}"><span class="vc-dot"></span>` +
+      `<b>${k}</b><i>${v}</i><small>mA</small></span>`).join("");
     const ibat = d.derived && d.derived.batt_current_ma;
-    quickCard = `<div class="card"><h2>Quick Wireless 电池电流决策<span class="tag">算法聚合 · 非 MCA votable</span></h2>` +
+    quickCard = `<div class="card wide"><h2>Quick Wireless 电池电流决策<span class="tag">算法聚合 · 非 MCA votable</span></h2>` +
       `<div class="vote-head"><small>select_max_ibat 输出${dec.log_time ? " · " + esc(dec.log_time) : ""}</small>` +
       `<span class="vote-result">cur_max:[Final] <b>${dec.final}</b><small>mA</small></span>` +
-      (ibat !== null && ibat !== undefined ? `<span class="vote-result">实际 ibat <b>${fmt(ibat, 0)}</b><small>mA</small></span>` : "") +
-      `</div><div class="vote-chips">${chips}</div></div>`;
+      (ibat !== null && ibat !== undefined ? `<span class="vote-result">实际 ibat <b id="quickActualIbat">${fmt(ibat, 0)}</b><small>mA</small></span>` : "") +
+      `</div><div class="vote-chips">${chips}</div>` +
+      (otherInputs.length ? `<details class="vote-all"><summary>其他算法输入 ${otherInputs.length} 项</summary>` +
+        `<div class="vote-chips">${otherChips}</div></details>` : "") + `</div>`;
   }
-  const cardsShown = chargingNow ? cards : "";
+  let extraJeitaCard = jeitaCard;
+  let cardsShown = "";
+  if (chargingNow) {
+    if (wideVoteLayout) {
+      const leftCards = cards.filter((_, i) => i % 2 === 0).join("");
+      const rightCards = cards.filter((_, i) => i % 2 === 1).join("") + jeitaCard;
+      cardsShown = `<div class="vote-column">${leftCards}</div>` +
+        `<div class="vote-column">${rightCards}</div>`;
+      extraJeitaCard = "";
+    } else {
+      cardsShown = cards.join("");
+    }
+  }
   const notChargingNote = !chargingNow
-    ? `<div class="card"><h2>电流投票实时表<span class="tag">未充电</span></h2>` +
+    ? `<div class="card wide"><h2>电流投票实时表<span class="tag">未充电</span></h2>` +
       `<p class="note">当前未充电（battery STATUS ≠ Charging），投票/仲裁不生效。</p></div>`
     : "";
-  el.innerHTML = summaryCard + quickCard + notChargingNote + cardsShown + jeitaCard;
+  const noVoteNote = chargingNow && noRelevant
+    ? `<div class="card wide"><h2>当前没有生效投票</h2>` +
+      `<p class="note">无线/有线主题尚未出现有效票，等待下一次日志刷新。</p></div>` : "";
+  $("limitSummary").innerHTML = summaryCard;
+  updateLimitLive(d);
+  el.innerHTML = quickCard + notChargingNote + noVoteNote + cardsShown + extraJeitaCard;
 }
 
 function renderCharts(d) {
   const h = d.history || [];
   const series = [
-    { id: "input_power_w", cv: "cv-input-power", label: "chart-input-power", color: "#22d3ee" },
     { id: "batt_current_ma", cv: "cv-batt-current", label: "chart-batt-current", color: "#34d399" },
-    { id: "input_voltage_mv", cv: "cv-vout", label: "chart-vout", color: "#fbbf24", scale: v => v / 1000 },
     { id: "input_current_ma", cv: "cv-iout", label: "chart-iout", color: "#a78bfa" },
+    { id: "input_voltage_mv", cv: "cv-vout", label: "chart-vout", color: "#fbbf24", scale: v => v / 1000 },
+    { id: "input_power_w", cv: "cv-input-power", label: "chart-input-power", color: "#22d3ee" },
   ];
   const srcEl = $("chart-input-source");
   if (srcEl) {
@@ -1142,9 +1377,13 @@ function renderCharts(d) {
   series.forEach(s => {
     const latest = d.derived ? d.derived[s.id] : null;
     $(s.label).textContent = latest === null || latest === undefined ? "--" : fmt(s.scale ? s.scale(latest) : latest, s.scale ? 2 : 0);
+    const cv = $(s.cv);
+    if (!cv) return;
+    const rect = cv.getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > window.innerHeight) return;
     const vals = h.map(x => x[s.id] === null || x[s.id] === undefined ? null : (s.scale ? s.scale(x[s.id]) : x[s.id]));
     const srcs = h.map(x => x.input_detail_source || x.input_source || "none");
-    drawLine($(s.cv), vals, s.color, s.label.replace("chart-", ""), srcs);
+    drawLine(cv, vals, s.color, s.label.replace("chart-", ""), srcs);
   });
 }
 
@@ -1232,10 +1471,16 @@ function renderSessions(d) {
   const el = $("liveSessions");
   const list = d.sessions || [];
   if (!list.length) {
+    $("sessionFoldSummary").textContent = "暂无会话";
     el.innerHTML = `<div class="card"><h2>实时会话档案<span class="tag">最近日志</span></h2>` +
       `<p class="note">暂未检测到插拔/握手事件；把手机放上无线充电板后会自动生成会话时间线。</p></div>`;
     return;
   }
+  const current = list[list.length - 1];
+  const currentStatus = current.ended ? "已结束" : "进行中";
+  const currentLimit = current.final_limit_ma !== null && current.final_limit_ma !== undefined
+    ? ` · ${current.final_limit_ma}mA` : "";
+  $("sessionFoldSummary").textContent = `${current.start || "-"} · ${currentStatus}${currentLimit}`;
   const cards = list.slice().reverse().map((s, i) => {
   const meta = [
     s.uuid ? `UUID ${s.uuid}` : null,
@@ -1277,8 +1522,9 @@ function render(data) {
     banner.classList.add("show");
     banner.textContent = data.error || "正在初始化采集…";
     $("kpis").innerHTML = KPI.map(k =>
-      `<div class="kpi"><div class="label">${k.label}</div><div class="value empty">--</div></div>`).join("");
+      `<div class="kpi"><span class="label">${k.label}</span><span class="reading"><b class="value empty">--</b></span></div>`).join("");
     $("groups").innerHTML = "";
+    $("limitSummary").innerHTML = "";
     $("voteTopics").innerHTML = "";
     $("liveSessions").innerHTML = "";
     return;
@@ -1290,12 +1536,12 @@ function render(data) {
     return;
   }
   setStatus("live", "实时采集");
-  renderKpis(data.derived || {});
+  renderKpis(data.derived || {}, data.thermal || {});
   const logsStale = data.meta && data.meta.logs_stale;
   const staleEl = $("logsStaleBadge");
   if (staleEl) staleEl.style.display = logsStale ? "" : "none";
   renderGroups(data);
-  // 每次快速刷新都重绘投票区，让“Ns前”等相对时间持续增长
+  // renderVoters 内部按日志签名缓存，快速刷新只更新实际电池电流
   renderVoters(data);
   renderCharts(data);
   const sessionsJson = JSON.stringify(data.sessions || []);
@@ -1328,6 +1574,17 @@ async function load() {
       if (data.meta.fast_interval) {
         pollMs = Math.max(1000, data.meta.fast_interval * 1000);
       }
+      const fastBadge = $("fastRefreshBadge");
+      if (fastBadge) {
+        const modeText = data.meta.fast_mode === "no_viewer" ? "后台"
+          : data.meta.fast_mode === "idle" ? "未充电" : "充电";
+        fastBadge.textContent = `${modeText} · ${data.meta.fast_interval || 3} 秒刷新`;
+      }
+      const logsSec = data.meta.logs_interval || 10;
+      const voteBadge = $("voteRefreshBadge");
+      const sessionBadge = $("sessionRefreshBadge");
+      if (voteBadge) voteBadge.textContent = `仅生效票 · ${logsSec} 秒刷新`;
+      if (sessionBadge) sessionBadge.textContent = `${logsSec} 秒刷新`;
     }
     render(data);
   } catch (err) {
@@ -1353,7 +1610,7 @@ setInterval(() => {
     (lastMeta.logs_updated_at || Date.now()) + logsInterval - Date.now());
   const lc = $("logsCountdown");
   if (lc) lc.textContent = (logsRemain / 1000).toFixed(1) + "s";
-}, 250);
+}, 1000);
 
 load();
 </script>

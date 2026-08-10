@@ -4,7 +4,7 @@
 Redmi K80 Pro (miro) MCA charging real-time dashboard backend (ADB 版).
 
 数据语义与安卓版 SnapshotCollector.java 对齐：
-- 快速采集（sysfs + battery + thermal + history）默认 3 秒
+- 快速采集自适应：充电 3 秒、未充电 12 秒、无页面访问 45 秒
 - 日志采集（voters / sessions / EPP / 实际下发 ICL）默认 10 秒
 - 电池电流约定：充电为正、放电为负；电池功率保留正负号
 - 日志读取失败保留上次成功数据，并由 logs_stale 标记
@@ -300,26 +300,31 @@ class AdbReader:
             self.last_log_fname = fname
             path = f"{MCA_LOG_DIR}/{fname}"
             code, out, _ = self._run(
-                ["shell", "su", "-c", f'"tail -c {tail_bytes} {path} | grep -a -E \'mca_vote\'"'],
+                ["shell", "su", "-c", f'"tail -c {tail_bytes} {path} | grep -a -F \'mca_vote\'"'],
                 timeout=15)
             # grep 无匹配时退出码为 1，属于“读取成功但无内容”，不算失败
             return (code in (0, 1), out if code in (0, 1) else "")
         except FileNotFoundError:
             return False, ""
 
-    def read_session_logs(self, tail_bytes: int = 4194304, file_count: int = 3) -> tuple[bool, str]:
-        """Grep session events from the newest mca_log files (chronological).
+    def read_session_logs(self, tail_bytes: int = 4194304, file_count: int = 2) -> tuple[bool, str]:
+        """Grep session events from at most two newest mca_log files (chronological).
 
         Returns (read_ok, text)：与 read_vote_logs 相同，grep 无匹配不算失败。
+        两个文件仅用于覆盖日志轮转边界；parse_sessions 最终只保留最新会话。
         """
         if not self.available:
             return False, ""
-        pattern = ("power_good|AUTHEN_FINISH|uuid_value|TX_ADAPTER|"
-                   "FAST_CHARGE|fast chg success|set chg current|open path ibus|"
-                   "smartchg_soc_limit_callback|strategy_wireless_get_qc_enable|"
-                   "strategy_wireless_get_charging_info|"
-                   "BPP drawload|rx_iout_limit|epp plus|EPP\\+|"
-                   "send_vout_range_request|set adapter voltage")
+        grep_args = (
+            "-e 'power_good' -e 'AUTHEN_FINISH' -e 'uuid_value' "
+            "-e 'TX_ADAPTER' -e 'FAST_CHARGE' -e 'fast chg success' "
+            "-e 'set chg current' -e 'open path ibus' "
+            "-e 'smartchg_soc_limit_callback' "
+            "-e 'strategy_wireless_get_qc_enable' "
+            "-e 'strategy_wireless_get_charging_info' "
+            "-e 'BPP drawload' -e 'rx_iout_limit' -e 'epp plus' "
+            "-e 'EPP+' -e 'send_vout_range_request' -e 'set adapter voltage'"
+        )
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n {file_count}"'], timeout=10)
@@ -336,7 +341,8 @@ class AdbReader:
                 return False, ""
             self.last_log_fname = files[-1]
             script = "; ".join(
-                f"tail -c {tail_bytes} {MCA_LOG_DIR}/{f} | grep -a -E '{pattern}' | grep -v sysfs_show"
+                f"tail -c {tail_bytes} {MCA_LOG_DIR}/{f} | grep -a -F {grep_args} "
+                "| grep -v -F 'sysfs_show'"
                 for f in files)
             code, out, _ = self._run(["shell", "su", "-c", f'"{script}"'], timeout=25)
             return (code in (0, 1), out if code in (0, 1) else "")
@@ -351,18 +357,19 @@ class AdbReader:
         """
         if not self.available:
             return False, ""
-        pattern = ("power_good|usb online|real_type changed|"
-                   "sc8581_set_operation_mode|"
-                   "mca_quick_charge_update_work_mode_para|"
-                   "strategy_quickchg_map_ibus_to_fsw|"
-                   "cur_work_cp|"
-                   "strategy_buckchg_charge_limit|"
-                   "strategy_buckchg_update_charge_status|"
-                   "mca_quick_charge_regulation|"
-                   "mca_wireless_quick_charge_select_cur_work_mode|"
-                   "mca_wireless_quick_charge_select_max_ibat|"
-                   "mca_quick_charge_select_max_ibat:.*cur_stage .*cur_max .*cur_work_cp|"
-                   "mca_quick_charge_select_max_ibat:.*cur_max .*secure_cur .*channel_cur .*thermal_cur")
+        # 全部是字面量；通用 mca_quick_charge_select_max_ibat 已覆盖原先两个 .* 分支。
+        grep_args = (
+            "-e 'power_good' -e 'usb online' -e 'real_type changed' "
+            "-e 'sc8581_set_operation_mode' "
+            "-e 'mca_quick_charge_update_work_mode_para' "
+            "-e 'strategy_quickchg_map_ibus_to_fsw' -e 'cur_work_cp' "
+            "-e 'strategy_buckchg_charge_limit' "
+            "-e 'strategy_buckchg_update_charge_status' "
+            "-e 'mca_quick_charge_regulation' "
+            "-e 'mca_wireless_quick_charge_select_cur_work_mode' "
+            "-e 'mca_wireless_quick_charge_select_max_ibat' "
+            "-e 'mca_quick_charge_select_max_ibat'"
+        )
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n 1"'], timeout=10)
@@ -373,7 +380,7 @@ class AdbReader:
                 return False, ""
             self.last_log_fname = fname
             path = f"{MCA_LOG_DIR}/{fname}"
-            script = (f"tail -c {tail_bytes} {path} | grep -a -E '{pattern}' "
+            script = (f"tail -c {tail_bytes} {path} | grep -a -F {grep_args} "
                       f"| tail -n {tail_lines}")
             code, out, _ = self._run(["shell", "su", "-c", f'"{script}"'], timeout=15)
             return (code in (0, 1), out if code in (0, 1) else "")
@@ -387,7 +394,7 @@ class AdbReader:
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c",
-                 f'"tail -c {tail_bytes} {THERMAL_DUMP} | grep -a -E \'MONITOR-WIRELESS\' | tail -n 3"'],
+                 f'"tail -c {tail_bytes} {THERMAL_DUMP} | grep -a -F \'MONITOR-WIRELESS\' | tail -n 3"'],
                 timeout=15)
             return out if code == 0 else ""
         except FileNotFoundError:
@@ -435,9 +442,11 @@ def parse_uevent(text: str) -> dict[str, str]:
     return out
 
 
-def num(raw: str) -> float | None:
+def num(raw: object) -> float | None:
     try:
-        return float(raw.strip())
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        return float(str(raw).strip())
     except (TypeError, ValueError):
         return None
 
@@ -1096,7 +1105,7 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
     - 以 power_good_on 建立会话，不再靠 300 秒间隔猜测
     - power_good_off 也进入“充电板移除”事件并标记会话结束
     - 所有电流变化 / open path 事件都保留
-    - 会话最多 3 个，每个会话最多 100 条事件
+    - 只保留最新 1 个会话，每个会话最多 100 条事件
     """
     sessions: list[dict] = []
     cur: dict | None = None
@@ -1157,7 +1166,7 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
             cur["smartendura"] = True
             evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
 
-    while len(sessions) > 3:
+    while len(sessions) > 1:
         sessions.pop(0)
     for s in sessions:
         while len(s["events"]) > 100:
@@ -1166,22 +1175,34 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
 
 
 class Sampler:
-    """双周期采集：快采集 3s（sysfs/battery/thermal/history），日志采集 20s。
+    """自适应双通道采集。
+
+    快速通道按充电/空闲/无页面访问切换间隔；日志通道连接时按配置周期、
+    完全断开时至少 60s。
 
     日志（voters/sessions/EPP/实际 ICL）读取失败时保留上次成功数据，
     只把 logs_stale 置 True，页面据此提示“显示上次成功数据”。
     """
 
-    def __init__(self, adb: AdbReader, fast_interval: float, logs_interval: float):
+    def __init__(self, adb: AdbReader, fast_interval: float, logs_interval: float,
+                 idle_interval: float = 12.0, no_viewer_interval: float = 45.0,
+                 no_viewer_after: float = 30.0):
         self.adb = adb
         self.fast_interval = max(1.0, float(fast_interval))
+        self.idle_interval = max(self.fast_interval, float(idle_interval))
+        self.no_viewer_interval = max(self.idle_interval, float(no_viewer_interval))
+        self.no_viewer_after = max(10.0, float(no_viewer_after))
+        self.last_viewer_at = 0.0
         self.logs_interval = max(5.0, float(logs_interval))
+        self.logs_active = True
         self.vote_logs_stale = False
         self.session_logs_stale = False
         self.power_path_logs_stale = False
         self.logs_updated_at = time.time() * 1000
         # 使用独立 stop_event，避免覆盖 threading.Thread 内部的 _stop()
         self.stop_event = threading.Event()
+        self.fast_wakeup = threading.Event()
+        self.logs_wakeup = threading.Event()
         self.history: deque[dict] = deque(maxlen=180)
         self.lock = threading.Lock()
         self.snapshot: dict = self._build_error_snapshot("initializing")
@@ -1248,7 +1269,8 @@ class Sampler:
                 self.collect_fast()
             except Exception as exc:  # keep the page alive on any sampling error
                 self._publish(self._build_error_snapshot(str(exc)))
-            self.stop_event.wait(self.fast_interval)
+            self.fast_wakeup.wait(self.current_fast_interval())
+            self.fast_wakeup.clear()
 
     def run_logs(self) -> None:
         while not self.stop_event.is_set():
@@ -1256,13 +1278,61 @@ class Sampler:
                 self.collect_logs()
             except Exception as exc:  # 日志失败不打断整体循环
                 print(f"[warn] collect_logs failed: {exc}")
-            self.stop_event.wait(self.logs_interval)
+            self.logs_wakeup.wait(self.current_logs_interval())
+            self.logs_wakeup.clear()
 
     def stop(self) -> None:
         self.stop_event.set()
+        self.fast_wakeup.set()
+        self.logs_wakeup.set()
+
+    def viewer_active(self) -> bool:
+        return time.monotonic() - self.last_viewer_at <= self.no_viewer_after
+
+    def current_fast_interval(self) -> float:
+        if not self.viewer_active():
+            return self.no_viewer_interval
+        return self.fast_interval if self.logs_active else self.idle_interval
+
+    def current_fast_mode(self) -> str:
+        if not self.viewer_active():
+            return "no_viewer"
+        return "active" if self.logs_active else "idle"
+
+    def mark_viewer_access(self) -> None:
+        was_active = self.viewer_active()
+        self.last_viewer_at = time.monotonic()
+        if not was_active:
+            self.fast_wakeup.set()
+
+    def current_logs_interval(self) -> float:
+        return self.logs_interval if self.logs_active else max(60.0, self.logs_interval)
+
+    def _update_logs_active(self, data: dict) -> None:
+        status = str(data.get("battery", {}).get("status", {}).get("value", ""))
+        derived = data.get("derived", {})
+        source = derived.get("input_source")
+        vrect = derived.get("vrect")
+        input_connected = (
+            source in ("wired", "wireless")
+            or bool(derived.get("wired_online"))
+            or isinstance(vrect, (int, float)) and vrect > 0
+        )
+        was_active = self.logs_active
+        self.logs_active = status.lower() == "charging" or input_connected
+        if self.logs_active != was_active:
+            self.fast_wakeup.set()
+        if self.logs_active and not was_active:
+            self.logs_wakeup.set()
 
     def get(self) -> dict:
         with self.lock:
+            meta = self.snapshot.setdefault("meta", {})
+            current = self.current_fast_interval()
+            meta["interval"] = current
+            meta["fast_interval"] = current
+            meta["fast_mode"] = self.current_fast_mode()
+            meta["viewer_active"] = self.viewer_active()
             return self.snapshot
 
     def collect_fast(self) -> None:
@@ -1278,6 +1348,7 @@ class Sampler:
 
         raw = self._normalize_live(batch)
         parsed = self._build(raw)
+        self._update_logs_active(parsed)
         parsed["mode"] = "live"
         parsed["connected"] = True
         parsed["thermal"] = parse_thermal_dump(self.adb.read_thermal_dump())
@@ -1585,24 +1656,44 @@ class Sampler:
                 buck["actual_limit_source"] = (
                     "quick_wireless cur_max" if self.last_quick_cur_max is not None
                     else "wireless loop buck_fcc")
-            # 无线路径判定（当前 power_good 会话缓存）：
-            # 1) quick wireless work_mode=1/2/4 → CP 硬证据（无需 operation mode）
-            # 2) operation mode>0 → CP；operation mode=0 → Buck（并清掉旧 work_mode）
-            # 3) 均无 → unknown
+            # 活跃无线充电优先使用实时 CP 总线电流；空闲时回退会话日志。
+            derived = core.get("derived", {})
+            status = str(core.get("battery", {}).get("status", {}).get("value", ""))
+            cp_ibus = derived.get("cp_ibus_total_ma")
+            input_iout = derived.get("input_current_ma")
+            batt_current = derived.get("batt_current_ma")
+            live_wireless_charging = (
+                derived.get("input_source") == "wireless"
+                and status.lower() == "charging"
+                and isinstance(input_iout, (int, float)) and input_iout > 0
+                and isinstance(batt_current, (int, float)) and batt_current > 0
+                and isinstance(cp_ibus, (int, float))
+            )
             wm = self.last_cp_work_mode
-            if wm in (1, 2, 4):
+            if live_wireless_charging:
+                cp_active = abs(cp_ibus) >= 1.0
+                buck["cp_state"] = "cp" if cp_active else "buck"
+                buck["cp_active"] = cp_active
+                buck["cp_state_source"] = "sysfs_cp_ibus_total"
+                buck["cp_ibus_total_ma"] = cp_ibus
+                if cp_active and wm is not None:
+                    buck["cp_ratio"] = wm
+            elif wm in (1, 2, 4):
                 buck["cp_state"] = "cp"
                 buck["cp_ratio"] = wm
                 buck["cp_active"] = True
+                buck["cp_state_source"] = "quick_wireless_work_mode"
             elif self.last_cp_mode is not None:
                 cp_active = self.last_cp_mode > 0
                 buck["cp_state"] = "cp" if cp_active else "buck"
                 buck["cp_active"] = cp_active
+                buck["cp_state_source"] = "sc8581_operation_mode"
                 if cp_active and wm is not None:
                     buck["cp_ratio"] = wm
             else:
                 buck["cp_state"] = "unknown"
                 buck["cp_active"] = False
+                buck["cp_state_source"] = "none"
             if self.last_wls_work_mode_ms is not None:
                 buck["wls_work_mode_ms"] = self.last_wls_work_mode_ms
             if self.last_cur_decision is not None:
@@ -1630,9 +1721,11 @@ class Sampler:
         }
         meta = core.setdefault("meta", {})
         meta.update({
-            "interval": self.fast_interval,
-            "fast_interval": self.fast_interval,
-            "logs_interval": self.logs_interval,
+            "interval": self.current_fast_interval(),
+            "fast_interval": self.current_fast_interval(),
+            "fast_mode": self.current_fast_mode(),
+            "viewer_active": self.viewer_active(),
+            "logs_interval": self.current_logs_interval(),
             "logs_updated_at": int(self.logs_updated_at),
             "logs_stale": self.vote_logs_stale or self.session_logs_stale,
             "power_path_logs_stale": self.power_path_logs_stale,
@@ -1667,9 +1760,11 @@ class Sampler:
             "battery": {}, "derived": {}, "history": [], "voters": {},
             "sessions": [], "thermal": {},
             "meta": {
-                "interval": self.fast_interval,
-                "fast_interval": self.fast_interval,
-                "logs_interval": self.logs_interval,
+                "interval": self.current_fast_interval(),
+                "fast_interval": self.current_fast_interval(),
+                "fast_mode": self.current_fast_mode(),
+                "viewer_active": self.viewer_active(),
+                "logs_interval": self.current_logs_interval(),
                 "logs_updated_at": int(self.logs_updated_at),
                 "logs_stale": self.vote_logs_stale or self.session_logs_stale,
                 "power_path_logs_stale": self.power_path_logs_stale,
@@ -1874,6 +1969,7 @@ class Sampler:
             "wired_tel_log_time": tel_log_time,
             "wired_tel_at": tel_at,
             "wired_usb_online": usb_online,
+            "cp_ibus_total_ma": num(nodes.get("ibus_total", {}).get("value", "")),
             "battery_power_w": round(battery_power, 2) if battery_power is not None else None,
             "batt_current_ma": round(batt_cur_ma, 1) if batt_cur_ma is not None else None,
             "batt_voltage_mv": round(batt_vol_mv, 1) if batt_vol_mv is not None else None,
@@ -1911,9 +2007,11 @@ class Sampler:
             "battery": battery,
             "derived": derived,
             "meta": {
-                "interval": self.fast_interval,
-                "fast_interval": self.fast_interval,
-                "logs_interval": self.logs_interval,
+                "interval": self.current_fast_interval(),
+                "fast_interval": self.current_fast_interval(),
+                "fast_mode": self.current_fast_mode(),
+                "viewer_active": self.viewer_active(),
+                "logs_interval": self.current_logs_interval(),
                 "logs_updated_at": int(self.logs_updated_at),
                 "logs_stale": self.vote_logs_stale or self.session_logs_stale,
                 "power_path_logs_stale": self.power_path_logs_stale,
@@ -1930,6 +2028,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/api/data":
+            self.server.sampler.mark_viewer_access()
             data = self.server.sampler.get()
             body = json.dumps(data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
@@ -1985,6 +2084,12 @@ def main():
                         help="fast sample/refresh interval in seconds (default 3)")
     parser.add_argument("--logs-interval", type=float, default=10.0,
                         help="vote/session log interval in seconds (default 10)")
+    parser.add_argument("--idle-interval", type=float, default=12.0,
+                        help="fast sampling interval while not charging (default 12)")
+    parser.add_argument("--no-viewer-interval", type=float, default=45.0,
+                        help="fast sampling interval without page access (default 45)")
+    parser.add_argument("--no-viewer-after", type=float, default=30.0,
+                        help="seconds without page access before background mode (default 30)")
     parser.add_argument("--port", type=int, default=8765, help="HTTP port (default 8765)")
     parser.add_argument("--open", action="store_true", help="open the page in the default browser")
     args = parser.parse_args()
@@ -1992,13 +2097,15 @@ def main():
     adb = AdbReader(args.adb_host, args.serial, args.adb)
     if not adb.available:
         print(f"[warn] ADB device unavailable ({adb.last_error}); page will show offline state.")
-    sampler = Sampler(adb, args.interval, args.logs_interval)
+    sampler = Sampler(adb, args.interval, args.logs_interval,
+                      args.idle_interval, args.no_viewer_interval, args.no_viewer_after)
     sampler.start()
 
     server = DashboardServer(("127.0.0.1", args.port), sampler, None)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"[ok] dashboard running: {url}  "
-          f"(fast={args.interval}s, logs={args.logs_interval}s, "
+          f"(fast={args.interval}s, idle={args.idle_interval}s, "
+          f"no-viewer={args.no_viewer_interval}s, logs={args.logs_interval}s, "
           f"adb={adb.adb_bin or 'not found'}, version={VERSION})")
     if args.open:
         import webbrowser
