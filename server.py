@@ -40,6 +40,22 @@ USB_UEVENT = "/sys/class/power_supply/usb/uevent"
 MCA_LOG_DIR = "/data/vendor/bsplog/charge/charge_logger/mca_log"
 THERMAL_DUMP = "/data/vendor/thermal/thermal.dump"
 
+# 实机快充切换测试确认：Buck 阶段 ibus_total=0，电荷泵预启动阶段会短暂
+# 出现 3~5mA，真正承载电流后直接跃升到 400mA 以上。不要把任意非零值
+# 都当作当前主功率路径已经切到 CP。
+CP_IBUS_BUCK_MAX_MA = 20.0
+CP_IBUS_ACTIVE_MIN_MA = 100.0
+
+
+def classify_wireless_cp_ibus(cp_ibus_ma: float) -> str:
+    """Classify the live wireless path from charge-pump branch current."""
+    current = abs(cp_ibus_ma)
+    if current >= CP_IBUS_ACTIVE_MIN_MA:
+        return "cp"
+    if current <= CP_IBUS_BUCK_MAX_MA:
+        return "buck"
+    return "transition"
+
 
 def _detect_version() -> str:
     """Git short hash（启动时的版本标识），失败时返回 dev。"""
@@ -1656,7 +1672,8 @@ class Sampler:
                 buck["actual_limit_source"] = (
                     "quick_wireless cur_max" if self.last_quick_cur_max is not None
                     else "wireless loop buck_fcc")
-            # 活跃无线充电优先使用实时 CP 总线电流；空闲时回退会话日志。
+            # 活跃无线充电优先使用实时 CP 支路电流；3~5mA 可能只是预启动，
+            # 不能把任意非零值都判成当前主路径已经切到 CP。
             derived = core.get("derived", {})
             status = str(core.get("battery", {}).get("status", {}).get("value", ""))
             cp_ibus = derived.get("cp_ibus_total_ma")
@@ -1671,8 +1688,9 @@ class Sampler:
             )
             wm = self.last_cp_work_mode
             if live_wireless_charging:
-                cp_active = abs(cp_ibus) >= 1.0
-                buck["cp_state"] = "cp" if cp_active else "buck"
+                cp_state = classify_wireless_cp_ibus(cp_ibus)
+                cp_active = cp_state == "cp"
+                buck["cp_state"] = cp_state
                 buck["cp_active"] = cp_active
                 buck["cp_state_source"] = "sysfs_cp_ibus_total"
                 buck["cp_ibus_total_ma"] = cp_ibus

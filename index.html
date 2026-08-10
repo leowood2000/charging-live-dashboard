@@ -938,6 +938,8 @@ function renderVoters(d) {
       pathLabel = `CP${ratio ? " · " + ratio : ""}`;
     } else if (cpState === "buck") {
       pathLabel = "Buck";
+    } else if (cpState === "transition") {
+      pathLabel = "切换中";
     } else {
       pathLabel = "待确认";
     }
@@ -949,7 +951,7 @@ function renderVoters(d) {
     const ppStaleW = !livePath && d.meta && d.meta.power_path_logs_stale;
     const staleW = ppStaleW
       ? (cpState === "unknown" ? " · 路径日志读取异常" : " · 数据暂时陈旧") : "";
-    summary.push(`<span class="chip" title="活跃无线充电时优先按实时 mca_platform_cp/ibus_total 判定；空闲时回退 operation mode/work_mode${sourceW ? " · " + esc(sourceW) : ""}${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(pathLabel)}</b>${staleW ? `<small>${esc(staleW.replace(/^ · /, ""))}</small>` : ""}</span>`);
+    summary.push(`<span class="chip" title="活跃无线充电按实时 mca_platform_cp/ibus_total 三态判定：≤20mA 为 Buck，≥100mA 为 CP，>20mA 且 <100mA 为切换中；空闲时回退 operation mode/work_mode${sourceW ? " · " + esc(sourceW) : ""}${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(pathLabel)}</b>${staleW ? `<small>${esc(staleW.replace(/^ · /, ""))}</small>` : ""}</span>`);
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;
@@ -1116,7 +1118,8 @@ function renderVoters(d) {
           summary.push(`<span class="chip" title="当前没有启用且非零的 wireless_thermal_(20/30/50/80)w 票">无线热控上限<b>--</b><small>无热控票</small></span>`);
         }
       } else {
-        summary.push(`<span class="chip" title="无线功率路径尚未确认，不拿 Buck 路径 FCC 冒充当前上限">当前电池充电电流上限<b>--</b><small>路径待确认</small></span>`);
+        const pathPending = wCpState === "transition" ? "路径切换中" : "路径待确认";
+        summary.push(`<span class="chip" title="无线功率路径尚未确认，不拿 Buck 路径 FCC 冒充当前上限">当前电池充电电流上限<b>--</b><small>${pathPending}</small></span>`);
       }
       if (battMa !== null && battMa !== undefined) {
         summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b id="limitBattCurrent">${battMa > 0 ? "+" : ""}${fmt(battMa, 0)}mA</b><small>battery</small></span>`);
