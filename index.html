@@ -963,15 +963,16 @@ function renderVoters(d) {
     } else {
       pathLabel = "待确认";
     }
-    const livePath = cpSource === "sysfs_cp_ibus_total";
+    const livePath = cpSource && cpSource.startsWith("sysfs_cp_ibus_total");
+    const fusedPath = cpSource === "sysfs_cp_ibus_total+session_cp_mode";
     const sourceW = livePath
-      ? `实时 CP 总线 ${fmt(buck.cp_ibus_total_ma, 0)}mA`
+      ? `实时 CP 总线 ${fmt(buck.cp_ibus_total_ma, 0)}mA${fusedPath ? " + 当前会话 CP mode" : ""}`
       : cpSource === "quick_wireless_work_mode" ? "Quick Wireless work_mode"
       : cpSource === "sc8581_operation_mode" ? "SC8581 operation mode" : "";
     const ppStaleW = !livePath && d.meta && d.meta.power_path_logs_stale;
     const staleW = ppStaleW
       ? (cpState === "unknown" ? " · 路径日志读取异常" : " · 数据暂时陈旧") : "";
-    summary.push(`<span class="chip" title="无线连接期间始终按实时 mca_platform_cp/ibus_total 三态判定：≤20mA 为 Buck，≥100mA 为 CP，>20mA 且 <100mA 为切换中；驱动停充后统一显示已停止，不回退旧 operation mode/work_mode${sourceW ? " · " + esc(sourceW) : ""}${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(pathLabel)}</b>${staleW ? `<small>${esc(staleW.replace(/^ · /, ""))}</small>` : ""}</span>`);
+    summary.push(`<span class="chip" title="无线路径融合判定：实时 CP 总线 ≥100mA 为 CP，20–100mA 为切换中；≤20mA 时仅在当前会话没有 operation mode/work_mode CP 证据时判 Buck，避免 CP 稳态瞬时 0mA 误判；驱动停充后统一显示已停止${sourceW ? " · " + esc(sourceW) : ""}${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(pathLabel)}</b>${staleW ? `<small>${esc(staleW.replace(/^ · /, ""))}</small>` : ""}</span>`);
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;

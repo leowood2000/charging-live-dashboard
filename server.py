@@ -41,8 +41,8 @@ MCA_LOG_DIR = "/data/vendor/bsplog/charge/charge_logger/mca_log"
 THERMAL_DUMP = "/data/vendor/thermal/thermal.dump"
 
 # 实机快充切换测试确认：Buck 阶段 ibus_total=0，电荷泵预启动阶段会短暂
-# 出现 3~5mA，真正承载电流后直接跃升到 400mA 以上。不要把任意非零值
-# 都当作当前主功率路径已经切到 CP。
+# 出现 3~5mA，真正承载电流后直接跃升到 400mA 以上。CP 稳态也可能
+# 瞬时读到 0，因此低电流必须与当前会话 operation mode/work_mode 融合。
 CP_IBUS_BUCK_MAX_MA = 20.0
 CP_IBUS_ACTIVE_MIN_MA = 100.0
 
@@ -55,6 +55,18 @@ def classify_wireless_cp_ibus(cp_ibus_ma: float) -> str:
     if current <= CP_IBUS_BUCK_MAX_MA:
         return "buck"
     return "transition"
+
+
+def resolve_wireless_cp_state(cp_ibus_ma: float,
+                              cp_mode: int | None,
+                              cp_work_mode: int | None) -> str:
+    """Fuse live branch current with hard CP evidence from this wireless session."""
+    live = classify_wireless_cp_ibus(cp_ibus_ma)
+    session_cp = (
+        cp_mode is not None and cp_mode > 0
+        or cp_mode is None and cp_work_mode in (1, 2, 4)
+    )
+    return "cp" if live == "buck" and session_cp else live
 
 
 def _detect_version() -> str:
@@ -404,13 +416,13 @@ class AdbReader:
             return False, ""
 
     def read_thermal_dump(self, tail_bytes: int = 65536) -> str:
-        """Tail the newest thermal.dump lines (mi_thermald live state)."""
+        """Read latest wireless plus latest generic virtual-temperature line."""
         if not self.available:
             return ""
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c",
-                 f'"tail -c {tail_bytes} {THERMAL_DUMP} | grep -a -F \'MONITOR-WIRELESS\' | tail -n 3"'],
+                 f'"tail -c {tail_bytes} {THERMAL_DUMP} | awk \'/VIRTUAL-SENSOR-FORMULA/ {{ any=\\$0 }} /MONITOR-WIRELESS/ {{ wls=\\$0 }} END {{ if (wls != \\\"\\\") print wls; if (any != \\\"\\\" && any != wls) print any }}\'"'],
                 timeout=15)
             return out if code == 0 else ""
         except FileNotFoundError:
@@ -1080,7 +1092,20 @@ def is_last_wireless_power_off(text: str) -> bool:
 
 THERMAL_WIRELESS_RE = re.compile(
     r"\[([A-Z0-9\-]*MONITOR-WIRELESS)\]\[VIRTUAL-SENSOR-FORMULA (\d+)\]")
+THERMAL_ANY_RE = re.compile(
+    r"\[([A-Z0-9\-]+)\]\[VIRTUAL-SENSOR-FORMULA (\d+)\]")
 THERMAL_TARGET_RE = re.compile(r"\[wireless_charge (\d+)\]")
+
+
+def thermal_scene_for_segment(segment: str) -> str:
+    suffix = "-MONITOR-WIRELESS"
+    for key, scene in THERMAL_SCENES.items():
+        if not key.endswith(suffix):
+            continue
+        prefix = key[:-len(suffix)]
+        if prefix and (segment == prefix or segment.startswith(prefix + "-")):
+            return scene
+    return THERMAL_SCENES["MONITOR-WIRELESS"]
 
 
 def parse_thermal_dump(text: str) -> dict:
@@ -1088,14 +1113,18 @@ def parse_thermal_dump(text: str) -> dict:
     result: dict = {"scene": None, "virtual_temp": None, "target": None}
     for line in text.splitlines():
         m = THERMAL_WIRELESS_RE.search(line)
-        if not m:
+        if m:
+            seg = m.group(1)
+            result["scene"] = THERMAL_SCENES.get(seg, seg)
+            result["virtual_temp"] = int(m.group(2)) / 1000.0
+            t = THERMAL_TARGET_RE.search(line)
+            result["target"] = int(t.group(1)) if t else None
             continue
-        seg = m.group(1)
-        result["scene"] = THERMAL_SCENES.get(seg, seg)
-        result["virtual_temp"] = int(m.group(2)) / 1000.0
-        t = THERMAL_TARGET_RE.search(line)
-        if t:
-            result["target"] = int(t.group(1))
+        any_line = THERMAL_ANY_RE.search(line)
+        if any_line:
+            result["scene"] = thermal_scene_for_segment(any_line.group(1))
+            result["virtual_temp"] = int(any_line.group(2)) / 1000.0
+            result["target"] = None
     return result
 
 
@@ -1123,7 +1152,7 @@ def classify_session_line(line: str):
         return ("ichg", "设置充电电流", m.group(1))
     m = re.search(r"open path ibus (\d+)", line)
     if m:
-        return ("open", "打开快充路径", m.group(1))
+        return ("open", "CP 建链", m.group(1))
     if "smartchg_soc_limit_callback" in line and "effective_result: 1" in line:
         return ("smart", "SmartEndura 介入", "")
     return None
@@ -1140,6 +1169,9 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
     """
     sessions: list[dict] = []
     cur: dict | None = None
+    open_group: dict | None = None
+    open_first_ibus = 0
+    open_count = 0
     for line in text.splitlines():
         tm = VOTE_TIME_RE.search(line)
         ev = classify_session_line(line)
@@ -1158,11 +1190,16 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
                 "peak_limit_ma": None, "final_limit_ma": None,
             }
             sessions.append(cur)
+            open_group = None
+            open_count = 0
             cur["events"].append({"kind": kind, "time": t, "label": label, "detail": detail})
             continue
         if cur is None:
             continue
         evs = cur["events"]
+        if kind != "open":
+            open_group = None
+            open_count = 0
         if kind == "off":
             cur["ended"] = True
             evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
@@ -1192,7 +1229,19 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
             cur["final_limit_ma"] = v
         elif kind == "open":
             cur["opens"] += 1
-            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+            ibus = int(detail)
+            if open_group is None:
+                open_first_ibus = ibus
+                open_count = 1
+                open_group = {
+                    "kind": kind, "time": t, "label": label,
+                    "detail": f"ibus {ibus}mA",
+                }
+                evs.append(open_group)
+            else:
+                open_count += 1
+                open_group["detail"] = (
+                    f"ibus {open_first_ibus}→{ibus}mA · {open_count}次")
         elif kind == "smart":
             cur["smartendura"] = True
             evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
@@ -1241,6 +1290,9 @@ class Sampler:
         self.last_voters: dict = {}
         self.last_sessions: list = []
         self.last_epp: str | None = None
+        self.last_thermal: dict = {
+            "scene": None, "virtual_temp": None, "target": None,
+        }
         self.last_wls_icl: int | None = None
         self.last_wls_icl_at: int | None = None
         self.last_wls_icl_log_time: str | None = None
@@ -1382,7 +1434,12 @@ class Sampler:
         self._update_logs_active(parsed)
         parsed["mode"] = "live"
         parsed["connected"] = True
-        parsed["thermal"] = parse_thermal_dump(self.adb.read_thermal_dump())
+        thermal = parse_thermal_dump(self.adb.read_thermal_dump())
+        if thermal.get("virtual_temp") is not None:
+            self.last_thermal = copy.deepcopy(thermal)
+        elif self.last_thermal.get("virtual_temp") is not None:
+            thermal = copy.deepcopy(self.last_thermal)
+        parsed["thermal"] = thermal
 
         with self.lock:
             sample = {
@@ -1689,8 +1746,8 @@ class Sampler:
                 buck["actual_limit_source"] = (
                     "quick_wireless cur_max" if self.last_quick_cur_max is not None
                     else "wireless loop buck_fcc")
-            # 活跃无线充电优先使用实时 CP 支路电流；3~5mA 可能只是预启动，
-            # 不能把任意非零值都判成当前主路径已经切到 CP。
+            # 实时 CP 支路电流与当前会话硬件模式融合：预启动 3~5mA 不能
+            # 单独证明 CP，但已确认 mode 后，瞬时 0mA 也不能推翻 CP。
             derived = core.get("derived", {})
             cp_ibus = derived.get("cp_ibus_total_ma")
             live_wireless_connected = (
@@ -1699,11 +1756,15 @@ class Sampler:
             )
             wm = self.last_cp_work_mode
             if live_wireless_connected:
-                cp_state = classify_wireless_cp_ibus(cp_ibus)
+                live_cp_state = classify_wireless_cp_ibus(cp_ibus)
+                cp_state = resolve_wireless_cp_state(
+                    cp_ibus, self.last_cp_mode, wm)
                 cp_active = cp_state == "cp"
                 buck["cp_state"] = cp_state
                 buck["cp_active"] = cp_active
-                buck["cp_state_source"] = "sysfs_cp_ibus_total"
+                buck["cp_state_source"] = (
+                    "sysfs_cp_ibus_total+session_cp_mode"
+                    if live_cp_state != cp_state else "sysfs_cp_ibus_total")
                 buck["cp_ibus_total_ma"] = cp_ibus
                 if cp_active and wm is not None:
                     buck["cp_ratio"] = wm
