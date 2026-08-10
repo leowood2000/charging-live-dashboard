@@ -4,7 +4,7 @@
 
 Android 独立版见 [charging-live-dashboard-android](https://github.com/leowood2000/charging-live-dashboard-android)。两版的数据语义保持一致。
 
-## v0.11.10 重点改进
+## v0.11.11 重点改进
 
 ### 更低的手机唤醒与后台功耗
 
@@ -27,7 +27,9 @@ Android 独立版见 [charging-live-dashboard-android](https://github.com/leowoo
 ### 已校正的数据语义
 
 - 实时数据中的“电池温度”是电芯实体温度；“当前限制”中的绿色“虚拟温度”是 mi_thermald 的主要温控决策温度，并与当前热控场景放在一起。
-- 活跃无线充电时优先读取实时 `mca_platform_cp/ibus_total`：实机验证 `≤20mA` 判定为 Buck、`≥100mA` 判定为 CP、`>20mA 且 <100mA` 显示“切换中”；避免把电荷泵预启动的 3–5mA 误判为当前 CP 主路径。空闲、暂停或节点缺失时才回退当前会话日志。
+- 无线连接期间优先读取实时 `mca_platform_cp/ibus_total`：实机验证 `≤20mA` 判定为 Buck、`≥100mA` 判定为 CP、`>20mA 且 <100mA` 显示“切换中”；避免把电荷泵预启动的 3–5mA 误判为当前 CP 主路径。无线未连接或节点缺失时才回退当前会话日志。
+- 输入仍连接但已自动停充时，路径从“停止中”稳定收敛到“已停止”，当前上限不再回显旧 CP/Buck 目标；有线连接必须由实时 USB 在线或有效 VBUS 证明，拔线后不会被缓存日志重新判成有线。
+- 日志年龄采用事件真实时间，并正确处理单个日志文件跨午夜；重启采集器不会把旧决策误标成“刚刚”。
 - 当前电池充电电流上限按路径取值：CP 使用 Quick Wireless `cur_max:[Final]`；Buck 使用 `buck_charge_curr effective`；路径不确定时显示“待确认”，不拿 Buck FCC 冒充结果。
 - 无线输入 ICL 取 `wireless_buck_input effective`，属于上游平台策略；实际 RX 输出取 `wls_debug iout`，属于遥测。二者并排观察，但不做数值一致性判断。
 - `wireless_qc=100` 不是“最终输入限流为 100mA”，不能作为最终无线输入 ICL；该值不参与首页最终限制结论。

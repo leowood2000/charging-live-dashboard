@@ -812,8 +812,8 @@ function renderVoters(d) {
   const battSt = (d.battery && d.battery.status && d.battery.status.value || "").toLowerCase();
   const chargingNow = battSt === "" ? true : battSt === "charging";
   const wirelessCharging = chargingNow && wirelessActive;
-  const wiredCharging = chargingNow && (
-    inputSrc === "wired" || !!(d.derived && d.derived.wired_online));
+  const wiredActive = inputSrc === "wired" || !!(d.derived && d.derived.wired_online);
+  const wiredCharging = chargingNow && wiredActive;
   // 日志数据年龄：投票/仲裁来自低频日志周期，可能与快速 KPI 短暂不一致
   const logsAge = d.meta && d.meta.logs_updated_at
     ? Math.max(0, Math.round((Date.now() - d.meta.logs_updated_at) / 1000)) : null;
@@ -833,6 +833,7 @@ function renderVoters(d) {
     inputSrc,
     battSt,
     wiredCp: d.derived && d.derived.wired_cp,
+    battCurrentBand: Math.abs(Number(d.derived && d.derived.batt_current_ma)) <= 300 ? "near-zero" : "flowing",
     logsAt: d.meta && d.meta.logs_updated_at,
     wideVoteLayout,
   });
@@ -851,10 +852,17 @@ function renderVoters(d) {
     if (isDeviceModelTable(t) || isProtocolTable(t) || isStaticParam(t)) return false;
     if (t === "quick_chg_disable" && wirelessActive) return false;      // 无线充电时隐藏有线快充禁用
     if (t === "wls_quick_chg_disable" && !wirelessActive) return false; // 非无线时隐藏无线快充禁用
-    if (wiredCharging) {
+    if (WIRED_PRESET_TOPICS.has(t)) {
       const wcp = (d.derived && d.derived.wired_cp) || {};
-      // 5V/9V 档位参数表：两档同时挂着，不是当前生效值，真正输入限流由 buck_input 表达
-      if (WIRED_PRESET_TOPICS.has(t)) return false;
+      const vbus = Number(d.derived && d.derived.input_voltage_mv);
+      // 这四张表各自有投票结果，但并不同时约束当前路径。仅在有线 Buck
+      // 已确认且实时 VBUS 可分档时，展示当前 5V/9V 对应的 in + ich 两张表。
+      if (!wiredCharging || wcp.state !== "buck" || !Number.isFinite(vbus) || vbus <= 0) return false;
+      const profile = vbus < 7000 ? "5v" : "9v";
+      if (!t.startsWith(`buck_${profile}_`)) return false;
+    }
+    if (wiredActive) {
+      const wcp = (d.derived && d.derived.wired_cp) || {};
       // 无线相关表有线时无效
       if (t.startsWith("wireless_")) return false;
       if (wcp.state === "cp") {
@@ -924,7 +932,17 @@ function renderVoters(d) {
       `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : ""}</small></span>`);
   };
   const buck = topics.wireless_buck_input;
-  if (chargingNow && wirelessActive) {
+  const battMa = d.derived && d.derived.batt_current_ma;
+  // 充电生效三态只在输入仍连接时成立；完全断开后不能让缓存的 OFF 票
+  // 随放电电流跨越阈值而反复冒充“刚停充”。
+  const ceEff = effectiveOf(topics.chg_enable);
+  const ibatMag = battMa !== null && battMa !== undefined ? Math.abs(battMa) : Number.NaN;
+  const inputConnected = wiredActive || wirelessActive;
+  const ceOff = !!ceEff && ceEff.value === 0;
+  const ceStopped = inputConnected && ceOff && Number.isFinite(ibatMag) && ibatMag <= 300;
+  const ceStopping = inputConnected && ceOff && Number.isFinite(ibatMag) && ibatMag > 300;
+  const limitContext = (chargingNow && inputConnected) || ceStopping || ceStopped;
+  if (limitContext && wirelessActive) {
     const ratio = buck && buck.cp_ratio
       ? (buck.cp_ratio === 1 ? "1:1（bypass）"
           : buck.cp_ratio === 2 ? "2:1（div2）"
@@ -934,7 +952,9 @@ function renderVoters(d) {
     const cpState = buck && buck.cp_state;
     const cpSource = buck && buck.cp_state_source;
     let pathLabel;
-    if (cpState === "cp") {
+    if (ceStopping || ceStopped) {
+      pathLabel = ceStopping ? "停止中" : "已停止";
+    } else if (cpState === "cp") {
       pathLabel = `CP${ratio ? " · " + ratio : ""}`;
     } else if (cpState === "buck") {
       pathLabel = "Buck";
@@ -951,14 +971,14 @@ function renderVoters(d) {
     const ppStaleW = !livePath && d.meta && d.meta.power_path_logs_stale;
     const staleW = ppStaleW
       ? (cpState === "unknown" ? " · 路径日志读取异常" : " · 数据暂时陈旧") : "";
-    summary.push(`<span class="chip" title="活跃无线充电按实时 mca_platform_cp/ibus_total 三态判定：≤20mA 为 Buck，≥100mA 为 CP，>20mA 且 <100mA 为切换中；空闲时回退 operation mode/work_mode${sourceW ? " · " + esc(sourceW) : ""}${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(pathLabel)}</b>${staleW ? `<small>${esc(staleW.replace(/^ · /, ""))}</small>` : ""}</span>`);
+    summary.push(`<span class="chip" title="无线连接期间始终按实时 mca_platform_cp/ibus_total 三态判定：≤20mA 为 Buck，≥100mA 为 CP，>20mA 且 <100mA 为切换中；驱动停充后统一显示已停止，不回退旧 operation mode/work_mode${sourceW ? " · " + esc(sourceW) : ""}${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(pathLabel)}</b>${staleW ? `<small>${esc(staleW.replace(/^ · /, ""))}</small>` : ""}</span>`);
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;
   const wlsMode = buck && buck.wls_mode;
-  if (chargingNow) {
+  if (limitContext) {
     const realTypeNode = (d.nodes || []).find(n => n.id === "real_type");
-    const connLabel = wiredCharging ? "有线" : wirelessCharging ? "无线" : "未知";
+    const connLabel = wiredActive ? "有线" : wirelessActive ? "无线" : "未知";
     const rtRaw = realTypeNode && realTypeNode.value ? String(realTypeNode.value) : "";
     const rtShow = rtRaw && !/^(unknown|未连接（放电中）|未识别（充电中）)$/i.test(rtRaw) ? rtRaw : "";
     // 连接类型属协议/连接状态：无线页面本身已明确，总仲裁不再展示；
@@ -966,19 +986,14 @@ function renderVoters(d) {
     if (!wirelessActive) {
       summary.push(`<span class="chip" title="battery 状态与 real_type">连接类型<b>${esc(connLabel)}</b>${rtShow ? `<small>${esc(rtShow)}</small>` : ""}</span>`);
     }
-    const battMa = d.derived && d.derived.batt_current_ma;
-    // 充电生效三态：正常充电 / 停止过渡（OFF 但实测仍有电流）/ 已停止（OFF 且电流≈0）
-    const ceEff = effectiveOf(topics.chg_enable);
-    const ibatMag = battMa !== null && battMa !== undefined ? Math.abs(battMa) : Number.NaN;
-    const ceOff = !!ceEff && ceEff.value === 0;
-    const ceStopped = ceOff && Number.isFinite(ibatMag) && ibatMag <= 300;
-    const ceStopping = ceOff && Number.isFinite(ibatMag) && ibatMag > 300;
-    if (wiredCharging) {
+    if (wiredActive) {
       const wcp = (d.derived && d.derived.wired_cp) || {};
       const ppStaleD = d.meta && d.meta.power_path_logs_stale;
       let wPath;
       let staleD = "";
-      if (wcp.state === "cp") {
+      if (ceStopping || ceStopped) {
+        wPath = ceStopping ? "停止中" : "已停止";
+      } else if (wcp.state === "cp") {
         wPath = `CP${wcp.ratio ? " · " + wcp.ratio + ":1" : ""}`;
         if (ppStaleD) staleD = " · 数据暂时陈旧";
       } else if (wcp.state === "buck") {
@@ -989,10 +1004,15 @@ function renderVoters(d) {
         if (ppStaleD) staleD = " · 路径日志读取异常";
       }
       summary.push(`<span class="chip" title="有线 CP 状态：电荷泵 operation mode + quickchg work_mode/ratio + cur_work_cp（内核日志符号 sc8581，设备树 SC8585）${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(wPath)}</b>${staleD ? `<small>${esc(staleD.replace(/^ · /, ""))}</small>` : ""}</span>`);
-      if (wcp.state === "cp") {
+      if (ceStopping || ceStopped) {
+        const stopLabel = ceStopping ? "停止中" : "已停止";
+        summary.push(`<span class="chip" title="输入仍连接，但 chg_enable 已 OFF；停止阶段不再展示可能滞后的 CP/Buck 上限">当前电池充电电流上限<b>--</b><small>${stopLabel}</small></span>`);
+        if (battMa !== null && battMa !== undefined) {
+          summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b id="limitBattCurrent">${battMa > 0 ? "+" : ""}${fmt(battMa, 0)}mA</b><small>battery</small></span>`);
+        }
+      } else if (wcp.state === "cp") {
         // 有线 CP：Quick Charge 算法目标（1611 型 cur_max 优先，1597 型阶段值兜底），绝不用 buck_charge_curr 顶替
-        if (!ceStopped) {
-          const wd = wcp.cur_max && wcp.cur_max.cur_max !== undefined && wcp.cur_max.cur_max !== null
+        const wd = wcp.cur_max && wcp.cur_max.cur_max !== undefined && wcp.cur_max.cur_max !== null
             ? wcp.cur_max : null;
           const wst = wcp.stage_cur_max && wcp.stage_cur_max.cur_max !== undefined
             && wcp.stage_cur_max.cur_max !== null ? wcp.stage_cur_max : null;
@@ -1050,7 +1070,6 @@ function renderVoters(d) {
           } else if (rawTarget !== null && !divSingle) {
             summary.push(`<span class="chip" title="分压比未知，无法选择对应 div 限制表，不做推算">综合有效上限<b>--</b><small>分压比待确认</small></span>`);
           }
-        }
         if (battMa !== null && battMa !== undefined) {
           summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b id="limitBattCurrent">${battMa > 0 ? "+" : ""}${fmt(battMa, 0)}mA</b><small>battery</small></span>`);
         }
@@ -1088,7 +1107,9 @@ function renderVoters(d) {
       const wDecFinal = wDec && wDec.final !== null && wDec.final !== undefined ? wDec.final : null;
       const wDecAge = wDec && wDec.at ? Math.max(0, Math.round((Date.now() - wDec.at) / 1000)) : null;
       const wDecStale = wDecAge !== null && wDecAge > 30;
-      if (wCpState === "cp") {
+      if (ceStopped) {
+        summary.push(`<span class="chip" title="chg_enable 已 OFF 且实测电池电流接近 0；停充前 Quick Wireless Final 只保留在详情中">当前电池充电电流上限<b>--</b><small>已停止</small></span>`);
+      } else if (wCpState === "cp") {
         if (wDecFinal !== null) {
           summary.push(`<span class="chip"${wDecStale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="quick wireless select_max_ibat 给 CP 路径的最终电池充电电流 ceiling（驱动算法目标；控制环/采样瞬态下实测可能略偏离）${wDec && wDec.log_time ? " · 日志 " + esc(wDec.log_time) : ""}${wDecStale ? " · 历史值/待刷新" : ""}">` +
             `当前电池充电电流上限<b>${fmt(wDecFinal, 0)}</b><small>Quick Wireless Final${wDecAge !== null ? " · " + wDecAge + "s前" : ""}${wDecStale ? " · 历史值/待刷新" : ""}</small></span>`);
@@ -1280,6 +1301,10 @@ function renderVoters(d) {
       wls_quick_chg_disable: "无线快充保护",
       quick_chg_disable: "有线快充保护",
       smartchg_delta_ichg: "SmartCharge 电流修正",
+      buck_5v_in: "Buck 5V 输入档",
+      buck_5v_ich: "Buck 5V 充电档",
+      buck_9v_in: "Buck 9V 输入档",
+      buck_9v_ich: "Buck 9V 充电档",
     };
     const title = topicLabels[t] || t;
     const rawTitle = topicLabels[t] ? `<small class="raw-topic">${esc(t)}</small>` : "";
@@ -1308,7 +1333,8 @@ function renderVoters(d) {
   // Quick Wireless 电池电流决策：算法聚合（非 MCA votable），仅无线路径展示
   let quickCard = "";
   const dec = buck && buck.cur_max_decision;
-  if (chargingNow && wirelessActive && dec) {
+  if (limitContext && wirelessActive && dec) {
+    const quickHistorical = ceStopped;
     const inputs = [
       ["channel_cur", dec.channel_cur],
       ["temp_max_cur", dec.temp_max_cur],
@@ -1326,9 +1352,9 @@ function renderVoters(d) {
       `<span class="vote-chip off" title="${k}"><span class="vc-dot"></span>` +
       `<b>${k}</b><i>${v}</i><small>mA</small></span>`).join("");
     const ibat = d.derived && d.derived.batt_current_ma;
-    quickCard = `<div class="card wide"><h2>Quick Wireless 电池电流决策<span class="tag">算法聚合 · 非 MCA votable</span></h2>` +
-      `<div class="vote-head"><small>select_max_ibat 输出${dec.log_time ? " · " + esc(dec.log_time) : ""}</small>` +
-      `<span class="vote-result">cur_max:[Final] <b>${dec.final}</b><small>mA</small></span>` +
+    quickCard = `<div class="card wide"><h2>Quick Wireless 电池电流决策<span class="tag">${quickHistorical ? "停充前记录" : "算法聚合 · 非 MCA votable"}</span></h2>` +
+      `<div class="vote-head"><small>${quickHistorical ? "停充前最后一次 select_max_ibat 输出" : "select_max_ibat 输出"}${dec.log_time ? " · " + esc(dec.log_time) : ""}</small>` +
+      `<span class="vote-result">${quickHistorical ? "停充前最后目标" : "cur_max:[Final]"} <b>${dec.final}</b><small>mA</small></span>` +
       (ibat !== null && ibat !== undefined ? `<span class="vote-result">实际 ibat <b id="quickActualIbat">${fmt(ibat, 0)}</b><small>mA</small></span>` : "") +
       `</div><div class="vote-chips">${chips}</div>` +
       (otherInputs.length ? `<details class="vote-all"><summary>其他算法输入 ${otherInputs.length} 项</summary>` +

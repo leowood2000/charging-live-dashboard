@@ -575,12 +575,18 @@ def abs_log_ms(fname: str, time_str: str) -> int:
     m = LOG_FILE_RE.search(fname or "")
     if m:
         base = datetime(datetime.now().year, int(m.group(1)), int(m.group(2))).date()
-    base_ms = int(datetime.combine(base, datetime.min.time()).timestamp() * 1000)
     p = time_str.split(":")
+    base_ms = int(datetime.combine(base, datetime.min.time()).timestamp() * 1000)
     if len(p) < 4:
         return base_ms
     try:
         secs = int(p[0]) * 3600 + int(p[1]) * 60 + int(p[2])
+        # 单个 MCA 文件可能跨过本地 00:00。文件名 HHMM 是文件开始时刻；
+        # 行时刻若比开始时刻早超过 12 小时，应属于次日而不是同日清晨。
+        if m:
+            file_start_secs = int(m.group(3)) * 3600 + int(m.group(4)) * 60
+            if secs + 12 * 3600 < file_start_secs:
+                base_ms += 24 * 3600 * 1000
         return base_ms + secs * 1000 + int(p[3])
     except ValueError:
         return base_ms
@@ -709,7 +715,8 @@ def parse_cp_work_mode(text: str) -> int | None:
     return last
 
 
-def parse_quick_cur_decision(text: str, offset_minutes: int = 0) -> dict | None:
+def parse_quick_cur_decision(
+        text: str, offset_minutes: int = 0, fname: str = "") -> dict | None:
     """Latest select_max_ibat decision: inputs (445) + cur_max:[Final] (446)."""
     last_inputs: dict | None = None
     result: dict | None = None
@@ -720,14 +727,15 @@ def parse_quick_cur_decision(text: str, offset_minutes: int = 0) -> dict | None:
             line)
         if m:
             tm = VOTE_TIME_RE.search(line)
+            log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
             last_inputs = {
                 "channel_cur": int(m.group(1)),
                 "temp_max_cur": int(m.group(2)),
                 "tx_adapter_max": int(m.group(3)),
                 "sw_qc_ichg": int(m.group(4)),
                 "sw_thermal_ichg": int(m.group(5)),
-                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
-                "at": int(time.time() * 1000),
+                "log_time": log_time,
+                "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
             }
             continue
         m2 = re.search(r"select_max_ibat:446 cur_max:\[Final\]: (\d+)", line)
@@ -832,24 +840,26 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
         mf = WIRED_FINAL_CUR_MAX_RE.search(line)
         if mf and d_ctx:
             tm = VOTE_TIME_RE.search(line)
+            log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
             d_cur_max = {
                 "cur_max": int(mf.group(1)),
                 "secure_cur": int(mf.group(2)),
                 "channel_cur": int(mf.group(3)),
                 "thermal_cur": int(mf.group(4)),
-                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
-                "at": int(time.time() * 1000),
+                "log_time": log_time,
+                "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
             }
             continue
         ms = WIRED_STAGE_CUR_MAX_RE.search(line)
         if ms and d_ctx:
             tm = VOTE_TIME_RE.search(line)
+            log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
             d_stage_cur_max = {
                 "stage": int(ms.group(1)),
                 "cur_max": int(ms.group(2)),
                 "delta": int(ms.group(3)),
-                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
-                "at": int(time.time() * 1000),
+                "log_time": log_time,
+                "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
             }
             d_cur_cp = True
             d_cur_cp_seq = seq
@@ -866,14 +876,15 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
             line)
         if m:
             tm = VOTE_TIME_RE.search(line)
+            log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
             w_inputs = {
                 "channel_cur": int(m.group(1)),
                 "temp_max_cur": int(m.group(2)),
                 "tx_adapter_max": int(m.group(3)),
                 "sw_qc_ichg": int(m.group(4)),
                 "sw_thermal_ichg": int(m.group(5)),
-                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
-                "at": int(time.time() * 1000),
+                "log_time": log_time,
+                "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
             }
             continue
         m2 = re.search(r"select_max_ibat:446 cur_max:\[Final\]: (\d+)", line)
@@ -932,11 +943,13 @@ def _latest_line_match(text: str, pattern: re.Pattern):
     return m, tm
 
 
-def parse_wired_buck_telemetry(text: str, offset_minutes: int = 0) -> dict | None:
+def parse_wired_buck_telemetry(
+        text: str, offset_minutes: int = 0, fname: str = "") -> dict | None:
     """最新一条 buckchg 状态行：vbus/ibus 为 µV/µA，返回 mV/mA。"""
     m, tm = _latest_line_match(text, WIRED_BUCK_TELEMETRY_RE)
     if m is None:
         return None
+    log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
     return {
         "vbus_mv": int(m.group(7)) / 1000.0,
         "ibus_ma": int(m.group(8)) / 1000.0,
@@ -944,12 +957,13 @@ def parse_wired_buck_telemetry(text: str, offset_minutes: int = 0) -> dict | Non
         "chg_en_client": m.group(4),
         "chg_type": int(m.group(5)),
         "source": "buckchg_telemetry",
-        "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
-        "at": int(time.time() * 1000),
+        "log_time": log_time,
+        "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
     }
 
 
-def parse_wired_cp_telemetry(text: str, offset_minutes: int = 0) -> dict | None:
+def parse_wired_cp_telemetry(
+        text: str, offset_minutes: int = 0, fname: str = "") -> dict | None:
     """最新一条有线 quick charge regulation 行。
 
     adp_volt 第一值为请求值、第二值为实测值（mV）；ibus 单位为 mA。
@@ -957,6 +971,7 @@ def parse_wired_cp_telemetry(text: str, offset_minutes: int = 0) -> dict | None:
     m, tm = _latest_line_match(text, WIRED_CP_TELEMETRY_RE)
     if m is None:
         return None
+    log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
     return {
         "vbus_mv": int(m.group(3)),
         "ibus_ma": int(m.group(10)),
@@ -964,8 +979,8 @@ def parse_wired_cp_telemetry(text: str, offset_minutes: int = 0) -> dict | None:
         "chg_en_client": "quick_charge",
         "chg_type": None,
         "source": "quick_charge_regulation",
-        "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
-        "at": int(time.time() * 1000),
+        "log_time": log_time,
+        "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
     }
 
 
@@ -1442,8 +1457,10 @@ class Sampler:
                 if wm["rx_iout_limit"] is not None:
                     self.last_rx_iout_limit = wm["rx_iout_limit"]
                     self.rx_iout_limit_captured = True
-                    self.last_rx_iout_limit_at = int(time.time() * 1000)
                     self.last_rx_iout_limit_log_time = wm["rx_iout_limit_time"] or ""
+                    self.last_rx_iout_limit_at = (
+                        abs_log_ms(self.last_log_fname, self.last_rx_iout_limit_log_time)
+                        if self.last_rx_iout_limit_log_time else int(time.time() * 1000))
                 icl = parse_wls_icl(
                     wtail, self.adb.utc_offset_minutes, self.last_log_fname)
                 if icl is not None:
@@ -1456,7 +1473,7 @@ class Sampler:
                         self.last_wls_chg_en = chg_en
                         self.last_wls_icl_log_time = log_time
                         self.last_wls_icl_ms = icl_ms
-                        self.last_wls_icl_at = int(time.time() * 1000)
+                        self.last_wls_icl_at = icl_ms if icl_ms > 0 else int(time.time() * 1000)
                 buck_fcc = parse_buck_fcc(wtail)
                 if buck_fcc is not None:
                     self.last_buck_fcc = buck_fcc
@@ -1512,9 +1529,9 @@ class Sampler:
             else:
                 tail = split_after_last_wired_boundary(pp_log)
                 cp_tel = parse_wired_cp_telemetry(
-                    tail, self.adb.utc_offset_minutes)
+                    tail, self.adb.utc_offset_minutes, self.last_log_fname)
                 buck_tel = parse_wired_buck_telemetry(
-                    tail, self.adb.utc_offset_minutes)
+                    tail, self.adb.utc_offset_minutes, self.last_log_fname)
                 if cp_tel is None and buck_tel is None:
                     self.last_wired_cp_tel = None
                     self.last_wired_buck_tel = None
@@ -1675,19 +1692,13 @@ class Sampler:
             # 活跃无线充电优先使用实时 CP 支路电流；3~5mA 可能只是预启动，
             # 不能把任意非零值都判成当前主路径已经切到 CP。
             derived = core.get("derived", {})
-            status = str(core.get("battery", {}).get("status", {}).get("value", ""))
             cp_ibus = derived.get("cp_ibus_total_ma")
-            input_iout = derived.get("input_current_ma")
-            batt_current = derived.get("batt_current_ma")
-            live_wireless_charging = (
+            live_wireless_connected = (
                 derived.get("input_source") == "wireless"
-                and status.lower() == "charging"
-                and isinstance(input_iout, (int, float)) and input_iout > 0
-                and isinstance(batt_current, (int, float)) and batt_current > 0
                 and isinstance(cp_ibus, (int, float))
             )
             wm = self.last_cp_work_mode
-            if live_wireless_charging:
+            if live_wireless_connected:
                 cp_state = classify_wireless_cp_ibus(cp_ibus)
                 cp_active = cp_state == "cp"
                 buck["cp_state"] = cp_state
@@ -1862,16 +1873,20 @@ class Sampler:
         usb_ibus_ma = num(usb.get("current_now", ""))
         if usb_ibus_ma is not None:
             usb_ibus_ma /= 1000.0          # uA -> mA
+        # 日志中的 CP/Buck 遥测可能在拔线后仍留在缓存。只有 USB online，或
+        # 实时 VBUS 明确高于 1V，才允许这些历史遥测证明“有线仍连接”。
+        wired_present = usb_online or (
+            usb_vbus_mv is not None and usb_vbus_mv > 1000)
 
         wstate = self.last_wired_state
         cp_tel = self.last_wired_cp_tel
         buck_tel = self.last_wired_buck_tel
-        if wstate == "cp":
+        if wstate == "cp" and wired_present:
             chosen = cp_tel or buck_tel
         elif wstate == "buck":
             chosen = buck_tel or cp_tel
         elif cp_tel and buck_tel:
-            chosen = cp_tel if cp_tel["log_time"] >= buck_tel["log_time"] else buck_tel
+            chosen = cp_tel if cp_tel["at"] >= buck_tel["at"] else buck_tel
         else:
             chosen = cp_tel or buck_tel
 
@@ -1915,12 +1930,15 @@ class Sampler:
                 rt_ibus_ma = usb_ibus_ma
                 rt_source = "usb_uevent"
                 rt_at = now_ms
-        if rt_source is None and tel_vbus_mv is not None and tel_ibus_ma is not None:
+        if (rt_source is None and wired_present
+                and tel_vbus_mv is not None and tel_ibus_ma is not None):
             rt_vbus_mv = tel_vbus_mv
             rt_ibus_ma = tel_ibus_ma
             rt_source = tel_source
             rt_at = tel_at
-        wired_online = rt_vbus_mv is not None and rt_ibus_ma is not None
+        wired_online = (
+            wired_present and rt_vbus_mv is not None and rt_vbus_mv > 1000
+            and rt_ibus_ma is not None)
         # mV × mA = µW，直接换算成 W（除以 1e6），前端只显示 W
         wired_power = (
             rt_vbus_mv * rt_ibus_ma / 1e6
