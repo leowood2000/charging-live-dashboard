@@ -4,7 +4,7 @@
 
 Android 独立版见 [charging-live-dashboard-android](https://github.com/leowood2000/charging-live-dashboard-android)。两版的数据语义保持一致。
 
-## v0.11.12 重点改进
+## v0.11.13 重点改进
 
 ### 更低的手机唤醒与后台功耗
 
@@ -32,7 +32,8 @@ Android 独立版见 [charging-live-dashboard-android](https://github.com/leowoo
 - 会话档案把连续的 `open path ibus` 电流爬升合并成一条“CP 建链”，保留首末电流和次数，不再误导为反复开关快充路径。
 - 输入仍连接但已自动停充时，路径从“停止中”稳定收敛到“已停止”，当前上限不再回显旧 CP/Buck 目标；有线连接必须由实时 USB 在线或有效 VBUS 证明，拔线后不会被缓存日志重新判成有线。
 - 日志年龄采用事件真实时间，并正确处理单个日志文件跨午夜；重启采集器不会把旧决策误标成“刚刚”。
-- 当前电池充电电流上限按路径取值：CP 使用 Quick Wireless `cur_max:[Final]`；Buck 使用 `buck_charge_curr effective`；路径不确定时显示“待确认”，不拿 Buck FCC 冒充结果。
+- 当前电池充电电流上限按来源与路径取值：无线 CP 使用手机原生 Quick Wireless `cur_max:[Final]`；有线 CP 使用当前 `div1/div2/div4` 路径的 `mca_thermal` 上限；Buck 使用 `buck_charge_curr effective`。路径或 single/multi 拓扑不能唯一确定时显示“待确认”，不拿其他支路的值冒充结果。
+- 从有线切换到无线时，实时输入源优先于残留 USB ONLINE/有线 CP 日志，避免无线慢充沿用上一段有线 CP 路径。
 - 无线输入 ICL 取 `wireless_buck_input effective`，属于上游平台策略；实际 RX 输出取 `wls_debug iout`，属于遥测。二者并排观察，但不做数值一致性判断。
 - `wireless_qc=100` 不是“最终输入限流为 100mA”，不能作为最终无线输入 ICL；该值不参与首页最终限制结论。
 - `xm_wls` 是能力/适配器允许值，不等同当前仲裁 winner。
