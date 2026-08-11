@@ -944,6 +944,7 @@ function renderVoters(d) {
       `${label}<b>${fmt(eff.value)}</b><small>${esc(eff.client)}${eff.calc ? " · 推算" : ""}</small></span>`);
   };
   const buck = topics.wireless_buck_input;
+  const wirelessPath = (d.derived && d.derived.wireless_path) || {};
   const battMa = d.derived && d.derived.batt_current_ma;
   // 充电生效三态只在输入仍连接时成立；完全断开后不能让缓存的 OFF 票
   // 随放电电流跨越阈值而反复冒充“刚停充”。
@@ -955,14 +956,15 @@ function renderVoters(d) {
   const ceStopping = inputConnected && ceOff && Number.isFinite(ibatMag) && ibatMag > 300;
   const limitContext = (chargingNow && inputConnected) || ceStopping || ceStopped;
   if (limitContext && wirelessContext) {
-    const ratio = buck && buck.cp_ratio
-      ? (buck.cp_ratio === 1 ? "1:1（bypass）"
-          : buck.cp_ratio === 2 ? "2:1（div2）"
-          : buck.cp_ratio === 4 ? "4:1（div4）"
-          : buck.cp_ratio + ":1")
+    const ratioValue = wirelessPath.ratio || (buck && buck.cp_ratio);
+    const ratio = ratioValue
+      ? (ratioValue === 1 ? "1:1（bypass）"
+          : ratioValue === 2 ? "2:1（div2）"
+          : ratioValue === 4 ? "4:1（div4）"
+          : ratioValue + ":1")
       : "";
-    const cpState = buck && buck.cp_state;
-    const cpSource = buck && buck.cp_state_source;
+    const cpState = wirelessPath.state || (buck && buck.cp_state);
+    const cpSource = wirelessPath.cp_state_source || (buck && buck.cp_state_source);
     let pathLabel;
     if (ceStopping || ceStopped) {
       pathLabel = ceStopping
@@ -980,7 +982,7 @@ function renderVoters(d) {
     const livePath = cpSource && cpSource.startsWith("sysfs_cp_ibus_total");
     const fusedPath = cpSource === "sysfs_cp_ibus_total+session_cp_mode";
     const sourceW = livePath
-      ? `实时 CP 总线 ${fmt(buck.cp_ibus_total_ma, 0)}mA${fusedPath ? " + 当前会话 CP mode" : ""}`
+      ? `实时 CP 总线 ${fmt(wirelessPath.cp_ibus_total_ma, 0)}mA${fusedPath ? " + 当前会话 CP mode" : ""}`
       : cpSource === "quick_wireless_work_mode" ? "Quick Wireless work_mode"
       : cpSource === "sc8581_operation_mode" ? "SC8581 operation mode" : "";
     const ppStaleW = !livePath && d.meta && d.meta.power_path_logs_stale;
@@ -990,7 +992,7 @@ function renderVoters(d) {
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;
-  const wlsMode = buck && buck.wls_mode;
+  const wlsMode = wirelessPath.wls_mode || (buck && buck.wls_mode);
   if (limitContext) {
     const realTypeNode = (d.nodes || []).find(n => n.id === "real_type");
     const connLabel = wiredActive ? "有线" : wirelessContext ? "无线" : "未知";
@@ -1089,13 +1091,16 @@ function renderVoters(d) {
       // Buck 总览显示 wireless_buck_input + 实际 RX；CP 总览显示 RX 允许上限 + 实际 RX。
       // 停充但无线仍连接时属于旁路供电：保留当前会话 ICL，并明确标注“旁路”，
       // 但不把它当作电池充电或 CP 的直接 RX 限流值。
-      const wCpState = buck && buck.cp_state;
+      const wCpState = wirelessPath.state || (buck && buck.cp_state);
       const bypassPower = ceStopping || ceStopped;
-      const wbiEff = effectiveOf(buck);
+      const wlsIclValue = Number.isFinite(Number(wirelessPath.wireless_icl))
+        ? Number(wirelessPath.wireless_icl) : null;
+      const wbiEff = effectiveOf(buck) || (wlsIclValue !== null
+        ? { client: "wireless_buck_input", value: wlsIclValue, calc: false } : null);
       const showWbiSummary = wCpState !== "cp" || bypassPower;
       if (wbiEff) {
         const smartStop = wbiEff.client === "soc_limit"
-          && !!buck && buck.smartendura_soc_limit === true
+          && wirelessPath.smartendura_soc_limit === true
           && battMa !== null && battMa !== undefined && Math.abs(battMa) <= 300;
         if (showWbiSummary) {
           const bypassNote = bypassPower
@@ -1114,7 +1119,7 @@ function renderVoters(d) {
       // 20/30/50/80W 是充电器类别：类别由 buck_charge_curr 中唯一启用的
       // wireless_thermal_(20/30/50/80)w 标识（驱动按检测类别启用）。
       const W_THERMAL_LABELS = { 20: "20W 类充电器", 30: "30W 类充电器", 50: "50W 类充电器", 80: "80W 类充电器" };
-      const wDec = buck && buck.cur_max_decision;
+      const wDec = wirelessPath.cur_max_decision || (buck && buck.cur_max_decision);
       const wDecFinal = wDec && wDec.final !== null && wDec.final !== undefined ? wDec.final : null;
       const wDecAge = wDec && wDec.at ? Math.max(0, Math.round((Date.now() - wDec.at) / 1000)) : null;
       const wDecStale = wDecAge !== null && wDecAge > 30;
@@ -1128,12 +1133,12 @@ function renderVoters(d) {
         } else {
           summary.push(`<span class="chip" title="CP 路径生效但尚未捕获 cur_max:[Final]">当前电池充电电流上限<b>--</b><small>Quick Wireless Final 待捕获</small></span>`);
         }
-        const rxLimitValue = buck && buck.rx_iout_limit !== null && buck.rx_iout_limit !== undefined
-          ? Number(buck.rx_iout_limit) : null;
-        const rxLimitCaptured = !!(buck && buck.rx_iout_limit_captured);
-        const rxLimitAge = buck && buck.rx_iout_limit_at
-          ? Math.max(0, Math.round((Date.now() - buck.rx_iout_limit_at) / 1000)) : null;
-        const rxLimitHistorical = !!(buck && buck.rx_iout_limit_stale)
+        const rxLimitValue = wirelessPath.rx_iout_limit !== null && wirelessPath.rx_iout_limit !== undefined
+          ? Number(wirelessPath.rx_iout_limit) : null;
+        const rxLimitCaptured = !!wirelessPath.rx_iout_limit_captured;
+        const rxLimitAge = wirelessPath.rx_iout_limit_at
+          ? Math.max(0, Math.round((Date.now() - wirelessPath.rx_iout_limit_at) / 1000)) : null;
+        const rxLimitHistorical = !!wirelessPath.rx_iout_limit_stale
           || (rxLimitAge !== null && rxLimitAge > 30);
         if (rxLimitCaptured && Number.isFinite(rxLimitValue)) {
           summary.push(`<span class="chip"${rxLimitHistorical ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="当前无线会话的 RX 输出策略允许上限；属于驱动策略层，不等同 SC8581 硬件 OCP 或电池侧上限${rxLimitHistorical ? " · 历史值/待刷新" : ""}">RX 输出允许上限<b>${fmt(rxLimitValue, 0)}mA</b><small>rx_iout_limit${rxLimitAge !== null ? " · " + rxLimitAge + "s前" : ""}${rxLimitHistorical ? " · 历史值/待刷新" : ""}</small></span>`);
@@ -1194,7 +1199,7 @@ function renderVoters(d) {
   });
   const thermalWinner = thermalVotes.find(v => v.winner);
   const thermalCandidate = thermalWinner || thermalVotes[0];
-  const decThermal = buck && buck.cur_max_decision && buck.cur_max_decision.sw_thermal_ichg;
+  const decThermal = wirelessPath.cur_max_decision && wirelessPath.cur_max_decision.sw_thermal_ichg;
   let thermalEvidence = chargingNow ? "未检测到生效温控票" : "";
   if (chargingNow && thermalCandidate) {
     thermalEvidence = `${thermalCandidate.winner ? "限制" : "生效票"} ${thermalCandidate.row.client} ${thermalCandidate.row.value}${topics[thermalCandidate.topic].unit || ""}`;
@@ -1356,7 +1361,7 @@ function renderVoters(d) {
   }
   // Quick Wireless 电池电流决策：算法聚合（非 MCA votable），仅无线路径展示
   let quickCard = "";
-  const dec = buck && buck.cur_max_decision;
+  const dec = wirelessPath.cur_max_decision || (buck && buck.cur_max_decision);
   if (limitContext && wirelessContext && dec) {
     const quickHistorical = ceStopped;
     const inputs = [
