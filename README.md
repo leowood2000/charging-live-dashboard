@@ -4,7 +4,7 @@
 
 Android 独立版见 [charging-live-dashboard-android](https://github.com/leowood2000/charging-live-dashboard-android)。两版的数据语义保持一致。
 
-## v0.11.13 重点改进
+## v0.11.14 重点改进
 
 ### 更低的手机唤醒与后台功耗
 
@@ -19,7 +19,7 @@ Android 独立版见 [charging-live-dashboard-android](https://github.com/leowoo
 ### 更紧凑、可快速扫读的界面
 
 - 桌面端实时数据为三列；四条曲线固定为：电池电流、输入电流、输入电压、输入功率。
-- “当前限制”按固定层级排版：充电路径独占一行；电池充电上限与实际电池电流一行；无线输入 ICL 与实际 RX 输出一行；温度、场景和使能状态从下一行开始。
+- “当前限制”按固定层级排版：充电路径独占一行；电池充电上限与实际电池电流一行；无线 CP 显示 RX 允许上限与实际 RX，Buck/旁路显示无线输入 ICL 与实际 RX；温度、场景和使能状态从下一行开始。
 - 电池上限尚未捕获时保留 `-- / 待捕获`，不会因缺数据导致行结构塌掉。
 - 私有快充、无线策略、有线策略和实时会话档案默认折叠。
 - 电流投票默认只展示生效票；未生效票收进主题内折叠区。桌面端投票卡使用独立双列，避免一张高卡把另一列撑出大块空白。
@@ -34,7 +34,9 @@ Android 独立版见 [charging-live-dashboard-android](https://github.com/leowoo
 - 日志年龄采用事件真实时间，并正确处理单个日志文件跨午夜；重启采集器不会把旧决策误标成“刚刚”。
 - 当前电池充电电流上限按来源与路径取值：无线 CP 使用手机原生 Quick Wireless `cur_max:[Final]`；有线 CP 使用当前 `div1/div2/div4` 路径的 `mca_thermal` 上限；Buck 使用 `buck_charge_curr effective`。路径或 single/multi 拓扑不能唯一确定时显示“待确认”，不拿其他支路的值冒充结果。
 - 从有线切换到无线时，实时输入源优先于残留 USB ONLINE/有线 CP 日志，避免无线慢充沿用上一段有线 CP 路径。
-- 无线输入 ICL 取 `wireless_buck_input effective`，属于上游平台策略；实际 RX 输出取 `wls_debug iout`，属于遥测。二者并排观察，但不做数值一致性判断。
+- 无线 CP 总览显示 `RX 输出允许上限` 与 `实际 RX 输出` 两行；两行分别使用与电池上限/实际电流相同的主次高亮颜色。
+- 无线停充但仍在旁路供电时，保留当前会话的 `无线输入 ICL（旁路）`；电池充电上限显示为 `-- / 已停止`。
+- 无线 Buck/旁路输入 ICL 取 `wireless_buck_input effective`，属于上游平台策略；无线 CP 的 RX 允许上限取当前会话 `rx_iout_limit`；实际 RX 输出取 `wls_debug iout`，属于遥测。各字段处于不同控制域，不做数值一致性判断。
 - `wireless_qc=100` 不是“最终输入限流为 100mA”，不能作为最终无线输入 ICL；该值不参与首页最终限制结论。
 - `xm_wls` 是能力/适配器允许值，不等同当前仲裁 winner。
 - `rx_iout_limit` 是驱动策略层的 RX 允许上限，和实际 RX 输出、上游 ICL 是三个不同层级。

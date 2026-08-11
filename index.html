@@ -961,7 +961,9 @@ function renderVoters(d) {
     const cpSource = buck && buck.cp_state_source;
     let pathLabel;
     if (ceStopping || ceStopped) {
-      pathLabel = ceStopping ? "停止中" : "已停止";
+      pathLabel = ceStopping
+        ? (wirelessActive ? "停充中 · 旁路" : "停止中")
+        : (wirelessActive ? "旁路供电" : "已停止");
     } else if (cpState === "cp") {
       pathLabel = `CP${ratio ? " · " + ratio : ""}`;
     } else if (cpState === "buck") {
@@ -980,7 +982,7 @@ function renderVoters(d) {
     const ppStaleW = !livePath && d.meta && d.meta.power_path_logs_stale;
     const staleW = ppStaleW
       ? (cpState === "unknown" ? " · 路径日志读取异常" : " · 数据暂时陈旧") : "";
-    summary.push(`<span class="chip" title="无线路径融合判定：实时 CP 总线 ≥100mA 为 CP，20–100mA 为切换中；≤20mA 时仅在当前会话没有 operation mode/work_mode CP 证据时判 Buck，避免 CP 稳态瞬时 0mA 误判；驱动停充后统一显示已停止${sourceW ? " · " + esc(sourceW) : ""}${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(pathLabel)}</b>${staleW ? `<small>${esc(staleW.replace(/^ · /, ""))}</small>` : ""}</span>`);
+    summary.push(`<span class="chip" title="无线路径融合判定：实时 CP 总线 ≥100mA 为 CP，20–100mA 为切换中；≤20mA 时仅在当前会话没有 operation mode/work_mode CP 证据时判 Buck，避免 CP 稳态瞬时 0mA 误判；停充且无线仍连接时显示旁路供电，断开后才显示已停止${sourceW ? " · " + esc(sourceW) : ""}${ppStaleW ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(pathLabel)}</b>${staleW ? `<small>${esc(staleW.replace(/^ · /, ""))}</small>` : ""}</span>`);
   }
   const ioutNow = d.derived && d.derived.iout !== null && d.derived.iout !== undefined
     ? d.derived.iout : null;
@@ -1075,26 +1077,31 @@ function renderVoters(d) {
       }
     } else if (wirelessActive) {
       // 无线协议控制域（前级）与后级 Buck/CP 路径是独立维度：
-      // 当前限制先展示控制/限制结果，再紧邻对应的实测值：
-      // 上游无线平台输入 ICL：wireless_buck_input effective → ADSP 0x1003；
-      // EPP+/QC 下与 RX iout 的映射未闭环，不直接比较；
-      // soc_limit 为 effective winner + SmartEndura 上下文 + ibat≈0 时标记“当前上游限制”；
-      // 实测 RX 输出在总览与 ICL 配对展示；RX 允许上限 / 控制模式 / 连接类型留在详情卡。
+      // Buck 总览显示 wireless_buck_input + 实际 RX；CP 总览显示 RX 允许上限 + 实际 RX。
+      // 停充但无线仍连接时属于旁路供电：保留当前会话 ICL，并明确标注“旁路”，
+      // 但不把它当作电池充电或 CP 的直接 RX 限流值。
+      const wCpState = buck && buck.cp_state;
+      const bypassPower = ceStopping || ceStopped;
       const wbiEff = effectiveOf(buck);
+      const showWbiSummary = wCpState !== "cp" || bypassPower;
       if (wbiEff) {
         const smartStop = wbiEff.client === "soc_limit"
           && !!buck && buck.smartendura_soc_limit === true
           && battMa !== null && battMa !== undefined && Math.abs(battMa) <= 300;
-        summary.push(`<span class="chip" title="wireless_buck_input effective → strategy_wireless_set_input_curr_limit → ADSP prop 0x1003（上游无线平台输入 ICL）；EPP+/QC 下与 RX iout 的映射未闭环证明，不做数值一致性比较${smartStop ? "；SmartEndura/soc_limit 停充上下文，当前上游限制" : ""}">` +
-          `无线输入 ICL<b>${fmt(wbiEff.value, 0)}mA</b>${smartStop ? "<small>当前瓶颈</small>" : ""}</span>`);
-      } else {
-        summary.push(`<span class="chip" title="wireless_buck_input effective 未捕获">无线输入 ICL<b>--</b><small>待捕获</small></span>`);
+        if (showWbiSummary) {
+          const bypassNote = bypassPower
+            ? (ceStopping ? "停充中 · 旁路输入策略" : "电池已停止 · 旁路输入策略") : "";
+          const label = bypassPower ? "无线输入 ICL（旁路）" : "无线输入 ICL";
+          summary.push(`<span class="chip" title="wireless_buck_input effective → strategy_wireless_set_input_curr_limit → ADSP prop 0x1003（上游无线平台输入策略）；${bypassPower ? "无线仍连接时保留作旁路供电参考，不代表电池充电上限" : "EPP+/QC 下与 RX iout 的映射未闭环，不做数值一致性比较"}${smartStop && !bypassPower ? "；SmartEndura/soc_limit 当前上游限制" : ""}">` +
+            `${label}<b>${fmt(wbiEff.value, 0)}mA</b><small>${bypassNote || (smartStop ? "当前上游策略" : "上游平台策略")}</small></span>`);
+        }
+      } else if (showWbiSummary) {
+        summary.push(`<span class="chip" title="wireless_buck_input effective 未捕获">${bypassPower ? "无线输入 ICL（旁路）" : "无线输入 ICL"}<b>--</b><small>待捕获</small></span>`);
       }
       // 无线路径：电池侧 ceiling 按当前功率路径选择——
       // CP 生效 → quick wireless cur_max:[Final]（算法决策，允许上限，带年龄）
       // Buck 生效 → buck_charge_curr MCA effective
       // 路径未确认 → 显示待确认，不用 buck_charge_curr 冒充当前上限
-      const wCpState = buck && buck.cp_state;
       // 20/30/50/80W 是充电器类别：类别由 buck_charge_curr 中唯一启用的
       // wireless_thermal_(20/30/50/80)w 标识（驱动按检测类别启用）。
       const W_THERMAL_LABELS = { 20: "20W 类充电器", 30: "30W 类充电器", 50: "50W 类充电器", 80: "80W 类充电器" };
@@ -1102,14 +1109,27 @@ function renderVoters(d) {
       const wDecFinal = wDec && wDec.final !== null && wDec.final !== undefined ? wDec.final : null;
       const wDecAge = wDec && wDec.at ? Math.max(0, Math.round((Date.now() - wDec.at) / 1000)) : null;
       const wDecStale = wDecAge !== null && wDecAge > 30;
-      if (ceStopped) {
-        summary.push(`<span class="chip" title="chg_enable 已 OFF 且实测电池电流接近 0；停充前 Quick Wireless Final 只保留在详情中">当前电池充电电流上限<b>--</b><small>已停止</small></span>`);
+      if (ceStopping || ceStopped) {
+        const stopText = ceStopping ? "停充中" : "已停止";
+        summary.push(`<span class="chip" title="chg_enable 已 OFF；电池侧 Quick Wireless Final 不再作为当前充电上限，旁路输入策略单独保留">当前电池充电电流上限<b>--</b><small>${stopText}</small></span>`);
       } else if (wCpState === "cp") {
         if (wDecFinal !== null) {
           summary.push(`<span class="chip"${wDecStale ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="quick wireless select_max_ibat 给 CP 路径的最终电池充电电流 ceiling（驱动算法目标；控制环/采样瞬态下实测可能略偏离）${wDec && wDec.log_time ? " · 日志 " + esc(wDec.log_time) : ""}${wDecStale ? " · 历史值/待刷新" : ""}">` +
             `当前电池充电电流上限<b>${fmt(wDecFinal, 0)}</b><small>Quick Wireless Final${wDecAge !== null ? " · " + wDecAge + "s前" : ""}${wDecStale ? " · 历史值/待刷新" : ""}</small></span>`);
         } else {
           summary.push(`<span class="chip" title="CP 路径生效但尚未捕获 cur_max:[Final]">当前电池充电电流上限<b>--</b><small>Quick Wireless Final 待捕获</small></span>`);
+        }
+        const rxLimitValue = buck && buck.rx_iout_limit !== null && buck.rx_iout_limit !== undefined
+          ? Number(buck.rx_iout_limit) : null;
+        const rxLimitCaptured = !!(buck && buck.rx_iout_limit_captured);
+        const rxLimitAge = buck && buck.rx_iout_limit_at
+          ? Math.max(0, Math.round((Date.now() - buck.rx_iout_limit_at) / 1000)) : null;
+        const rxLimitHistorical = !!(buck && buck.rx_iout_limit_stale)
+          || (rxLimitAge !== null && rxLimitAge > 30);
+        if (rxLimitCaptured && Number.isFinite(rxLimitValue)) {
+          summary.push(`<span class="chip"${rxLimitHistorical ? ' style="color:var(--amber);border-color:rgba(251,191,36,.5)"' : ""} title="当前无线会话的 RX 输出策略允许上限；属于驱动策略层，不等同 SC8581 硬件 OCP 或电池侧上限${rxLimitHistorical ? " · 历史值/待刷新" : ""}">RX 输出允许上限<b>${fmt(rxLimitValue, 0)}mA</b><small>rx_iout_limit${rxLimitAge !== null ? " · " + rxLimitAge + "s前" : ""}${rxLimitHistorical ? " · 历史值/待刷新" : ""}</small></span>`);
+        } else {
+          summary.push(`<span class="chip" title="无线 CP 已确认，但当前会话尚未捕获 rx_iout_limit；不使用 wireless_buck_input 代替">RX 输出允许上限<b>--</b><small>rx_iout_limit 待捕获</small></span>`);
         }
         // CP 总仲裁不单独展示“无线热控上限”：wireless_sw_thermal_ich effective
         // 与本轮 sw_thermal_ichg 不等价（已有真机证据），热控输入在
@@ -1183,7 +1203,7 @@ function renderVoters(d) {
     if (/充电路径|当前功率路径/.test(html)) return 0;
     if (/当前电池充电电流上限|电池充电上限|综合有效上限|Quick Charge 算法目标/.test(html)) return 10;
     if (/实际电池电流/.test(html)) return 20;
-    if (/无线(?:平台)?输入 ICL|有线输入限流/.test(html)) return 30;
+    if (/无线(?:平台)?输入 ICL|有线输入限流|RX 输出允许上限/.test(html)) return 30;
     if (/实际 RX 输出|实际输入电流|有线输入实测/.test(html)) return 40;
     if (/温度与热控|无线热控上限/.test(html)) return 50;
     if (/当前热控场景/.test(html)) return 55;
@@ -1193,7 +1213,7 @@ function renderVoters(d) {
   const decorateSummary = html => {
     let cls = "";
     if (/充电路径|当前功率路径/.test(html)) cls = "summary-path";
-    else if (/无线(?:平台)?输入 ICL|有线输入限流/.test(html)) cls = "summary-primary summary-input-limit";
+    else if (/无线(?:平台)?输入 ICL|有线输入限流|RX 输出允许上限/.test(html)) cls = "summary-primary summary-input-limit";
     else if (/当前电池充电电流上限|电池充电上限|综合有效上限|Quick Charge 算法目标/.test(html)) cls = "summary-primary";
     else if (/实际 RX 输出|实际输入电流|有线输入实测/.test(html)) cls = "summary-secondary summary-input-actual";
     else if (/实际电池电流/.test(html)) cls = "summary-secondary summary-battery-actual";
