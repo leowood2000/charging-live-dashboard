@@ -4,6 +4,12 @@
 
 Android 独立版见 [charging-live-dashboard-android](https://github.com/leowood2000/charging-live-dashboard-android)。两版的数据语义保持一致。
 
+## v0.11.17 重点改进
+
+- 修复有线充满停充后仍显示 `5mA · CP ibus_total` 的语义问题：CP 总线近空闲且 `chg_enable=OFF`、电池电流接近 0 时，输入主测量切换为 USB `CURRENT_NOW`。
+- 页面同时显示“外部系统输入”和独立“CP支路电流”，明确区分手机系统耗电与电池充电电流。
+- 正常 CP 充电或停充但 CP 仍有明显电流时，继续保留 `CP ibus_total` 为主输入。
+
 ## v0.11.16 重点改进
 
 - 新增 `wireless_connected` 会话锁存：`power_good_on/off` 决定充电板连接，低 RX 电流只影响 `input_source`，不再让停充旁路的当前限制卡反复消失。
