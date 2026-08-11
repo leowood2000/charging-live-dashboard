@@ -4,6 +4,12 @@
 
 Android 独立版见 [charging-live-dashboard-android](https://github.com/leowood2000/charging-live-dashboard-android)。两版的数据语义保持一致。
 
+## v0.11.18 重点改进
+
+- 投票日志改为按 topic 增量合并，某个低频 topic 滑出日志窗口时不再让有线/无线限制值瞬间消失。
+- 无线会话边界会清理旧无线票；有线断开边界会清理旧有线票，避免跨会话残留。
+- 新增独立 `derived.wireless_path`，无线 CP/Buck 路径、比例、Quick Wireless Final、ICL 和 RX 上限不再依赖 `wireless_buck_input` topic 是否仍在当前日志窗口。
+
 ## v0.11.17 重点改进
 
 - 修复有线充满停充后仍显示 `5mA · CP ibus_total` 的语义问题：CP 总线近空闲且 `chg_enable=OFF`、电池电流接近 0 时，输入主测量切换为 USB `CURRENT_NOW`。

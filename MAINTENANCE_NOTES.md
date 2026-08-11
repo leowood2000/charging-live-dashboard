@@ -1,6 +1,12 @@
 # 维护与跨会话交接说明
 
-最后更新：2026-08-11，目标发布版本：v0.11.17。
+最后更新：2026-08-11，目标发布版本：v0.11.18。
+
+## v0.11.18 投票滑窗与无线路径解耦
+
+- `last_voters` 按 topic 增量合并；日志窗口没有某个 topic 时保留上一份当前会话数据。
+- `power_good_on/off` 清理无线域投票；有线断开边界清理有线域投票，避免旧票跨会话残留。
+- `derived.wireless_path` 独立发布无线 CP/Buck 状态、比例、ICL、RX 上限和 Quick Wireless Final；`voters.wireless_buck_input` 仅作兼容详情镜像。
 
 ## v0.11.17 有线停充输入测量
 

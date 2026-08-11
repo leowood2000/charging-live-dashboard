@@ -714,7 +714,47 @@ def parse_vote_blocks(text: str, offset_minutes: int = 0, fname: str = "") -> di
                     "idx": int(m.group(1)), "client": m.group(2),
                     "enable": int(m.group(3)), "value": int(m.group(4)),
                 })
+    # changed/result 行可能位于 VOTER 表头之后，解析结束后回填当前 topic。
+    for topic, block in blocks.items():
+        if topic in changes_by_topic:
+            block["changed"] = changes_by_topic[topic]
+        if topic in results_by_topic:
+            block["result"] = results_by_topic[topic]
     return blocks
+
+
+def merge_vote_topics(previous: dict | None, incoming: dict | None) -> dict:
+    """按 topic 增量合并投票表；日志滑窗缺 topic 不视为撤票。"""
+    merged = copy.deepcopy(previous or {})
+    for topic, next_block in (incoming or {}).items():
+        if not isinstance(next_block, dict):
+            continue
+        old = merged.get(topic)
+        if not isinstance(old, dict):
+            merged[topic] = copy.deepcopy(next_block)
+            continue
+        block = copy.deepcopy(old)
+        for field in ("topic", "time", "unit", "policy"):
+            value = next_block.get(field)
+            if value not in (None, ""):
+                block[field] = value
+        for field in ("changed", "result"):
+            value = next_block.get(field)
+            if value is not None:
+                block[field] = copy.deepcopy(value)
+        rows = next_block.get("rows")
+        if isinstance(rows, list) and rows:
+            block["rows"] = copy.deepcopy(rows)
+        merged[topic] = block
+    return merged
+
+
+def clear_vote_topics(voters: dict | None, topics: set[str]) -> dict:
+    """在明确会话边界删除对应域，避免旧会话票无限期残留。"""
+    cleared = copy.deepcopy(voters or {})
+    for topic in topics:
+        cleared.pop(topic, None)
+    return cleared
 
 
 def _log_seconds(time_str: str) -> int:
@@ -1151,6 +1191,21 @@ def parse_wireless_mode(text: str, offset_minutes: int = 0) -> dict:
             "qc_enabled": qc_enabled}
 
 
+WIRELESS_VOTER_TOPICS = {
+    "wireless_buck_input", "wireless_bpp_in", "wireless_bppqc2_in",
+    "wireless_bppqc3_in", "wireless_epp_in", "wireless_auth_20w",
+    "wireless_auth_30w", "wireless_auth_50w", "wireless_auth_80w",
+    "wireless_auth_voice_box", "wireless_auth_magnet_30w",
+    "wireless_sw_qc_ich", "wireless_sw_thermal_ich",
+    "wls_single_chg_cur", "wls_multi_chg_cur", "wls_quick_chg_disable",
+}
+WIRED_VOTER_TOPICS = {
+    "buck_charge_curr", "buck_input", "div1_single", "div1_multi",
+    "div2_single", "div2_multi", "div4_single", "div4_multi",
+    "single_chg_cur", "multi_chg_cur", "quick_chg_disable", "quick_chg_en",
+}
+
+
 def is_last_wireless_power_off(text: str) -> bool:
     """True if the last wireless power event is removal (power_good_off)."""
     return (
@@ -1552,8 +1607,10 @@ class Sampler:
             parsed_voters = parse_vote_blocks(
                 vote_log, self.adb.utc_offset_minutes, self.last_log_fname)
             if parsed_voters:
-                self.last_voters = parsed_voters
-                self.last_chg_enabled = effective_vote_value(parsed_voters, "chg_enable")
+                self.last_voters = merge_vote_topics(self.last_voters, parsed_voters)
+                chg = effective_vote_value(self.last_voters, "chg_enable")
+                if chg is not None:
+                    self.last_chg_enabled = chg
 
         # 会话/EPP/ICL：低频瘦通道
         if session_read_ok and session_log.strip():
@@ -1662,6 +1719,7 @@ class Sampler:
             # 同一行（log_time/vbus/ibus）不刷新 at，避免旧值被伪装成刚刚采到；
             # 新会话/协议变化后尚无遥测时清空缓存并标记等待，页面回退 USB uevent
             if is_wired_disconnected(pp_log):
+                self.last_voters = clear_vote_topics(self.last_voters, WIRED_VOTER_TOPICS)
                 self.last_wired_cp_tel = None
                 self.last_wired_buck_tel = None
                 self.last_wired_tel_waiting = False
@@ -1794,6 +1852,7 @@ class Sampler:
         last_wls_session_ms 由调用方维护；这里只清 wireless-session scoped 数据，
         避免上一会话的 Final/CP/ICL/rx_iout_limit 冒充当前会话。
         """
+        self.last_voters = clear_vote_topics(self.last_voters, WIRELESS_VOTER_TOPICS)
         self.last_wls_icl = None
         self.last_wls_icl_at = None
         self.last_wls_icl_log_time = None
@@ -1897,6 +1956,8 @@ class Sampler:
             buck["rx_iout_limit_time"] = self.last_rx_iout_limit_log_time or ""
             buck["rx_iout_limit_stale"] = bool(self.session_logs_stale)
             buck["smartendura_soc_limit"] = bool(self.last_smartendura_soc_limit)
+        # 无线路径状态不依赖 wireless_buck_input topic 是否仍在日志滑窗中。
+        self._decorate_wireless_path(core)
         # 有线 CP 三态：cp / buck / unknown（时间顺序 + CP 证据优先）
         wstate = self.last_wired_state
         core.setdefault("derived", {})["wired_cp"] = {
@@ -1925,6 +1986,86 @@ class Sampler:
             "device": getattr(self.adb, "serial", None) or "",
             "schema_version": 2,
         })
+
+    def _decorate_wireless_path(self, core: dict) -> None:
+        """发布独立 wireless_path；voter topic 仅保留为详情兼容层。"""
+        derived = core.setdefault("derived", {})
+        path: dict = {}
+        if self.last_wls_icl is not None:
+            path.update({
+                "wireless_icl": self.last_wls_icl,
+                "wireless_icl_time": self.last_wls_icl_log_time or "",
+                "wireless_icl_at": self.last_wls_icl_at or 0,
+                "wireless_icl_ms": self.last_wls_icl_ms or 0,
+            })
+            if self.last_wls_chg_en is not None:
+                path["wireless_icl_chg_en"] = self.last_wls_chg_en
+        actual = self.last_quick_cur_max if self.last_quick_cur_max is not None else self.last_buck_fcc
+        if actual is not None:
+            path["battery_limit_ma"] = actual
+            path["battery_limit_source"] = (
+                "quick_wireless cur_max" if self.last_quick_cur_max is not None
+                else "wireless loop buck_fcc")
+        cp_ibus = derived.get("cp_ibus_total_ma")
+        live_wireless_connected = (
+            derived.get("input_source") == "wireless"
+            and isinstance(cp_ibus, (int, float))
+        )
+        cp_mode = self.last_cp_mode if self.last_wls_cp_evidence else None
+        wm = self.last_cp_work_mode if self.last_wls_cp_evidence else None
+        if live_wireless_connected:
+            live_cp_state = classify_wireless_cp_ibus(cp_ibus)
+            cp_state = resolve_wireless_cp_state(cp_ibus, cp_mode, wm)
+            cp_active = cp_state == "cp"
+            cp_source = (
+                "sysfs_cp_ibus_total+session_cp_mode"
+                if live_cp_state != cp_state else "sysfs_cp_ibus_total")
+            path["cp_ibus_total_ma"] = cp_ibus
+        elif wm in (1, 2, 4):
+            cp_state, cp_active, cp_source = "cp", True, "quick_wireless_work_mode"
+        elif cp_mode is not None:
+            cp_active = cp_mode > 0
+            cp_state, cp_source = ("cp" if cp_active else "buck"), "sc8581_operation_mode"
+        else:
+            cp_state, cp_active, cp_source = "unknown", False, "none"
+        path.update({
+            "state": cp_state,
+            "cp_active": cp_active,
+            "cp_state_source": cp_source,
+            "cp_session_evidence": bool(self.last_wls_cp_evidence),
+            "ratio": wm if cp_active and wm in (1, 2, 4) else None,
+            "wls_mode": self.last_wls_mode,
+            "rx_iout_limit": self.last_rx_iout_limit,
+            "rx_iout_limit_captured": self.rx_iout_limit_captured,
+            "rx_iout_limit_at": self.last_rx_iout_limit_at or 0,
+            "rx_iout_limit_time": self.last_rx_iout_limit_log_time or "",
+            "rx_iout_limit_stale": bool(self.session_logs_stale),
+            "smartendura_soc_limit": bool(self.last_smartendura_soc_limit),
+        })
+        if self.last_wls_work_mode_ms is not None:
+            path["wls_work_mode_ms"] = self.last_wls_work_mode_ms
+        if self.last_cur_decision is not None:
+            path["cur_max_decision"] = copy.deepcopy(self.last_cur_decision)
+        derived["wireless_path"] = path
+
+        # 旧前端/投票详情兼容：topic 存在时镜像派生字段，不再依赖 topic 存在。
+        buck = core.get("voters", {}).get("wireless_buck_input")
+        if isinstance(buck, dict):
+            buck.update(copy.deepcopy(path))
+            if "wireless_icl" in path:
+                buck.update({
+                    "icl": path["wireless_icl"],
+                    "icl_time": path.get("wireless_icl_time", ""),
+                    "icl_at": path.get("wireless_icl_at", 0),
+                    "icl_ms": path.get("wireless_icl_ms", 0),
+                })
+            if "battery_limit_ma" in path:
+                buck.update({
+                    "actual_limit": path["battery_limit_ma"],
+                    "actual_limit_source": path.get("battery_limit_source", ""),
+                })
+            if self.last_wls_chg_en is not None:
+                buck["chg_en"] = self.last_wls_chg_en
 
     @staticmethod
     def _append_epp_node(parsed: dict, epp: str) -> None:
