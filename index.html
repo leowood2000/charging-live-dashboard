@@ -1077,7 +1077,12 @@ function renderVoters(d) {
       const wiredIbus = d.derived && d.derived.wired_ibus_ma;
       if (Number.isFinite(Number(wiredIbus))) {
         const wiredSource = d.derived.wired_input_source || "wired_input";
-        summary.push(`<span class="chip" title="有线输入侧实时电流；Buck/待确认来自 USB uevent，CP 路径来自 ibus_total，不代表转换器输出电流">有线输入实测<b>${fmt(wiredIbus, 0)}mA</b><small>${esc(srcText(wiredSource))}</small></span>`);
+        const wiredLabel = wiredSource === "usb_uevent" ? "外部系统输入" : "有线输入实测";
+        summary.push(`<span class="chip" title="有线输入侧实时电流；停充且 CP ibus_total 近空闲时切换到 USB uevent，表示外部系统供电">${wiredLabel}<b>${fmt(wiredIbus, 0)}mA</b><small>${esc(srcText(wiredSource))}</small></span>`);
+        const cpIbus = d.derived.cp_ibus_total_ma;
+        if (wiredSource === "usb_uevent" && Number.isFinite(Number(cpIbus))) {
+          summary.push(`<span class="chip" title="CP 支路独立实时读数；停充近空闲时不作为总输入电流">CP支路电流<b>${fmt(cpIbus, 0)}mA</b><small>ibus_total</small></span>`);
+        }
       }
     } else if (wirelessContext) {
       // 无线协议控制域（前级）与后级 Buck/CP 路径是独立维度：

@@ -98,6 +98,34 @@ def resolve_wireless_connected(latched: bool | None,
     return input_source == "wireless" or (vout_mv is not None and vout_mv > 1000)
 
 
+def resolve_wired_input_source(wired_state: str,
+                               cp_ibus_ma: float | None,
+                               usb_ibus_ma: float | None,
+                               usb_online: bool,
+                               charging_enabled: bool | None,
+                               battery_current_ma: float | None) -> str | None:
+    """Choose wired telemetry; idle CP after stop must not hide USB system load."""
+    cp_valid = cp_ibus_ma is not None
+    stopped = (
+        charging_enabled is False
+        and battery_current_ma is not None
+        and abs(battery_current_ma) <= 300
+    )
+    cp_idle_while_stopped = stopped and cp_valid and abs(cp_ibus_ma) <= 50
+    if wired_state == "cp" and cp_valid and not cp_idle_while_stopped:
+        return "cp_ibus_total"
+    if usb_online and usb_ibus_ma is not None:
+        return "usb_uevent"
+    return "cp_ibus_total" if wired_state == "cp" and cp_valid else None
+
+
+def effective_vote_value(voters: dict, topic: str) -> int | None:
+    block = voters.get(topic) or {}
+    result = block.get("result") or {}
+    value = result.get("value")
+    return int(value) if isinstance(value, (int, float)) else None
+
+
 def _detect_version() -> str:
     """Git short hash（启动时的版本标识），失败时返回 dev。"""
     try:
@@ -1329,6 +1357,8 @@ class Sampler:
         self.snapshot: dict = self._build_error_snapshot("initializing")
         # 日志缓存：读取失败保留上次成功数据
         self.last_voters: dict = {}
+        # 最近一次 chg_enable effective vote；用于停充后校正有线输入测量源
+        self.last_chg_enabled: int | None = None
         self.last_sessions: list = []
         self.last_epp: str | None = None
         self.last_thermal: dict = {
@@ -1523,6 +1553,7 @@ class Sampler:
                 vote_log, self.adb.utc_offset_minutes, self.last_log_fname)
             if parsed_voters:
                 self.last_voters = parsed_voters
+                self.last_chg_enabled = effective_vote_value(parsed_voters, "chg_enable")
 
         # 会话/EPP/ICL：低频瘦通道
         if session_read_ok and session_log.strip():
@@ -2008,6 +2039,7 @@ class Sampler:
         usb_ibus_ma = num(usb.get("current_now", ""))
         if usb_ibus_ma is not None:
             usb_ibus_ma /= 1000.0          # uA -> mA
+        cp_ibus_total_ma = num(nodes.get("ibus_total", {}).get("value", ""))
         wireless_signal = (
             vout is not None and iout is not None
             and vout > 1000 and iout > 100)
@@ -2056,13 +2088,16 @@ class Sampler:
         rt_ibus_ma = None
         rt_source = None
         rt_at = None
-        if wstate == "cp" and wired_present:
-            ibus_total = num(nodes.get("ibus_total", {}).get("value", ""))
-            if ibus_total is not None:
+        preferred_wired_source = resolve_wired_input_source(
+            wstate, cp_ibus_total_ma, usb_ibus_ma, usb_online,
+            None if self.last_chg_enabled is None else self.last_chg_enabled == 1,
+            batt_cur_ma)
+        if preferred_wired_source == "cp_ibus_total" and wired_present:
+            if cp_ibus_total_ma is not None:
                 vb = tel_vbus_mv if tel_vbus_mv is not None else usb_vbus_mv
                 if vb is not None:
                     rt_vbus_mv = vb
-                    rt_ibus_ma = ibus_total
+                    rt_ibus_ma = cp_ibus_total_ma
                     rt_source = "cp_ibus_total"
                     rt_at = now_ms
         if rt_source is None and usb_online:
@@ -2107,7 +2142,6 @@ class Sampler:
             else None
         )
 
-        cp_ibus_total_ma = num(nodes.get("ibus_total", {}).get("value", ""))
         derived = {
             "vout": vout, "vrect": wls.get("vrect"), "iout": iout,
             "input_source": input_source,
