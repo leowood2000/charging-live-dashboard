@@ -4,6 +4,12 @@
 
 Android 独立版见 [charging-live-dashboard-android](https://github.com/leowood2000/charging-live-dashboard-android)。两版的数据语义保持一致。
 
+## v0.11.15 重点改进
+
+- 修复有线 CP 切换无线 CP 后偶发显示旧有线 `CP 1:1`：`USB ONLINE=0` 现在硬否决有线，残留 VBUS 不再把页面锁进有线分支。
+- 输入源判定改为 USB ONLINE 三态规则；仅 ONLINE 未知时允许 VBUS 回退，USB 在线且无线也有信号时仍以有线为准。
+- `ibus_total` 只在输入源确定后解释为当前 CP 总线数据，不再反向证明有线存在；新增 5 个固定回归测试。
+
 ## v0.11.14 重点改进
 
 ### 更低的手机唤醒与后台功耗

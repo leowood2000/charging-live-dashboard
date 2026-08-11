@@ -69,6 +69,26 @@ def resolve_wireless_cp_state(cp_ibus_ma: float,
     return "cp" if live == "buck" and session_cp else live
 
 
+def resolve_input_source(usb_online: bool | None,
+                         usb_vbus_mv: float | None,
+                         wireless_signal: bool) -> str:
+    """Resolve the physical input without using shared CP telemetry."""
+    if usb_online is True:
+        return "wired"
+    if usb_online is False:
+        return "wireless" if wireless_signal else "none"
+    if wireless_signal:
+        return "wireless"
+    return "wired" if usb_vbus_mv is not None and usb_vbus_mv > 1000 else "none"
+
+
+def cp_ibus_owner(input_source: str, cp_ibus_ma: float | None) -> str:
+    """Assign shared ibus_total only after the physical input is known."""
+    if cp_ibus_ma is None:
+        return "none"
+    return input_source if input_source in ("wired", "wireless") else "none"
+
+
 def _detect_version() -> str:
     """Git short hash（启动时的版本标识），失败时返回 dev。"""
     try:
@@ -1959,18 +1979,27 @@ class Sampler:
         # 有线输入遥测：按 wired_cp.state 选择来源（CP→regulation，Buck→buckchg，
         # unknown→最新一条），USB uevent 仅作兜底且永远带 source/时间。
         usb = raw.get("usb", {})
-        usb_online = str(usb.get("online", "")) == "1"
-        usb_known_off = str(usb.get("online", "")) == "0"
+        usb_online_raw = str(usb.get("online", ""))
+        usb_online_state = (
+            True if usb_online_raw == "1"
+            else False if usb_online_raw == "0" else None
+        )
+        usb_online = usb_online_state is True
+        usb_known_off = usb_online_state is False
         usb_vbus_mv = num(usb.get("voltage_now", ""))
         if usb_vbus_mv is not None:
             usb_vbus_mv /= 1000.0          # uV -> mV
         usb_ibus_ma = num(usb.get("current_now", ""))
         if usb_ibus_ma is not None:
             usb_ibus_ma /= 1000.0          # uA -> mA
-        # 日志中的 CP/Buck 遥测可能在拔线后仍留在缓存。只有 USB online，或
-        # 实时 VBUS 明确高于 1V，才允许这些历史遥测证明“有线仍连接”。
-        wired_present = usb_online or (
-            usb_vbus_mv is not None and usb_vbus_mv > 1000)
+        wireless_signal = (
+            vout is not None and iout is not None
+            and vout > 1000 and iout > 100)
+        # ONLINE=0 是有线硬否决；只有字段未知时才允许 VBUS 回退。
+        # ibus_total 是有线/无线 CP 共用测量，绝不能参与输入源判定。
+        input_source = resolve_input_source(
+            usb_online_state, usb_vbus_mv, wireless_signal)
+        wired_present = input_source == "wired"
 
         wstate = self.last_wired_state
         cp_tel = self.last_wired_cp_tel
@@ -2009,7 +2038,7 @@ class Sampler:
         rt_ibus_ma = None
         rt_source = None
         rt_at = None
-        if wstate == "cp":
+        if wstate == "cp" and wired_present:
             ibus_total = num(nodes.get("ibus_total", {}).get("value", ""))
             if ibus_total is not None:
                 vb = tel_vbus_mv if tel_vbus_mv is not None else usb_vbus_mv
@@ -2039,31 +2068,17 @@ class Sampler:
             if wired_online else None
         )
 
-        # 当前输入源抽象层：无线已出现有效 RX 电流时，不能让拔线瞬间残留的
-        # USB ONLINE/旧 CP 遥测继续把页面锁在有线 CP 分支。
-        wireless_signal = (
-            vout is not None and iout is not None
-            and vout > 1000 and iout > 100)
-        stale_wired_shell = (
-            wired_online and wireless_signal
-            and (rt_ibus_ma is None or rt_ibus_ma < 100))
-        if wireless_signal and (not wired_online or stale_wired_shell):
-            input_source = "wireless"
+        # 输入源已由 USB ONLINE 三态、无线信号和 VBUS fallback 独立确定；
+        # 这里只选择对应遥测，禁止测量值反向改变来源。
+        if input_source == "wireless":
             input_vol_mv = vout
             input_cur_ma = iout
             input_power = wireless_power
-        elif wired_online:
-            input_source = "wired"
+        elif input_source == "wired":
             input_vol_mv = rt_vbus_mv
             input_cur_ma = rt_ibus_ma
             input_power = wired_power
-        elif vout is not None and iout is not None and (vout != 0 or iout != 0):
-            input_source = "wireless"
-            input_vol_mv = vout
-            input_cur_ma = iout
-            input_power = wireless_power
         else:
-            input_source = "none"
             input_vol_mv = None
             input_cur_ma = None
             input_power = None
@@ -2074,6 +2089,7 @@ class Sampler:
             else None
         )
 
+        cp_ibus_total_ma = num(nodes.get("ibus_total", {}).get("value", ""))
         derived = {
             "vout": vout, "vrect": wls.get("vrect"), "iout": iout,
             "input_source": input_source,
@@ -2111,7 +2127,8 @@ class Sampler:
             "wired_tel_log_time": tel_log_time,
             "wired_tel_at": tel_at,
             "wired_usb_online": usb_online,
-            "cp_ibus_total_ma": num(nodes.get("ibus_total", {}).get("value", "")),
+            "cp_ibus_total_ma": cp_ibus_total_ma,
+            "cp_ibus_owner": cp_ibus_owner(input_source, cp_ibus_total_ma),
             "battery_power_w": round(battery_power, 2) if battery_power is not None else None,
             "batt_current_ma": round(batt_cur_ma, 1) if batt_cur_ma is not None else None,
             "batt_voltage_mv": round(batt_vol_mv, 1) if batt_vol_mv is not None else None,
