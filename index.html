@@ -1590,11 +1590,14 @@ function renderSessions(d) {
   }
   const current = list[list.length - 1];
   const currentStatus = current.ended ? "已结束" : "进行中";
+  const currentSource = current.source === "wired" ? "有线" : current.source === "wireless" ? "无线" : "未知来源";
   const currentLimit = current.final_limit_ma !== null && current.final_limit_ma !== undefined
     ? ` · ${current.final_limit_ma}mA` : "";
-  $("sessionFoldSummary").textContent = `${current.start || "-"} · ${currentStatus}${currentLimit}`;
+  $("sessionFoldSummary").textContent = `${currentSource} · ${current.start || "-"} · ${currentStatus}${currentLimit}`;
   const cards = list.slice().reverse().map((s, i) => {
+  const sourceLabel = s.source === "wired" ? "有线" : s.source === "wireless" ? "无线" : "未知来源";
   const meta = [
+    `来源 ${sourceLabel}`,
     s.uuid ? `UUID ${s.uuid}` : null,
     s.tx_adapter ? s.tx_adapter : null,
     s.fc_flag !== null && s.fc_flag !== undefined && s.fc_flag !== "" ? `fast chg ${s.fc_flag}` : null,
@@ -1607,7 +1610,7 @@ function renderSessions(d) {
       `<tr><td class="time">${esc(e.time)}</td><td>${esc(e.label)}</td>` +
       `<td class="mono">${esc(e.detail || "-")}</td></tr>`).join("");
     const status = s.ended ? "已结束" : "进行中";
-    return `<div class="card"><h2>会话 ${list.length - i}<span class="tag">${esc(s.start)} · ${status}</span></h2>` +
+    return `<div class="card"><h2>会话 ${list.length - i}<span class="tag">${esc(sourceLabel)} · ${esc(s.start)} · ${status}</span></h2>` +
       `<div class="chips" style="justify-content:flex-start;margin-bottom:10px">` +
       `${meta.map(c => `<span class="chip">${esc(c)}</span>`).join("")}</div>` +
       `<table><thead><tr><th>本地时间</th><th>事件</th><th>日志 / 数值</th></tr></thead>` +

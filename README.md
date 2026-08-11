@@ -4,6 +4,12 @@
 
 Android 独立版见 [charging-live-dashboard-android](https://github.com/leowood2000/charging-live-dashboard-android)。两版的数据语义保持一致。
 
+## v0.11.20 重点改进
+
+- 会话档案同时识别无线 `power_good_on/off` 和有线 `USB ONLINE=1/0` 边界；有线充电不再沿用旧无线会话。
+- 断开后立即封口当前会话，连续“设置充电电流”合并为首值→末值和次数，避免会话卡无限变长。
+- 会话卡明确标注来源（有线/无线），并覆盖有线 HVDCP/PD 等新会话。
+
 ## v0.11.19 重点改进
 
 - 有线 CP/Buck 的首页电池上限合并 MONITOR-BAT 路径票与 SIC-BAT `wired_chg_curr`，显示为有线热控上限，不再把单一分压票误称为完整上限。

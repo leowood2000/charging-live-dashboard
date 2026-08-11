@@ -401,7 +401,8 @@ class AdbReader:
         if not self.available:
             return False, ""
         grep_args = (
-            "-e 'power_good' -e 'AUTHEN_FINISH' -e 'uuid_value' "
+            "-e 'power_good' -e 'usb online' -e 'real_type changed' "
+            "-e 'AUTHEN_FINISH' -e 'uuid_value' "
             "-e 'TX_ADAPTER' -e 'FAST_CHARGE' -e 'fast chg success' "
             "-e 'set chg current' -e 'open path ibus' "
             "-e 'smartchg_soc_limit_callback' "
@@ -1266,6 +1267,10 @@ def classify_session_line(line: str):
         return ("off", "充电板移除", "")
     if "wireless power_good_on" in line:
         return ("on", "充电板接入", "")
+    if "usb online: 0" in line or re.search(r"real_type changed: \d+ => 0", line):
+        return ("wired_off", "有线充电移除", "")
+    if "usb online: 1" in line:
+        return ("wired_on", "有线充电接入", "")
     if "RX_INT_AUTHEN_FINISH" in line:
         return ("auth", "私有协议认证完成", "")
     m = re.search(r"uuid_value is (\S+)", line)
@@ -1293,17 +1298,17 @@ def classify_session_line(line: str):
 def parse_sessions(text: str, offset_minutes: int = 0) -> list:
     """Group mca_log handshake/limit events into charging sessions.
 
-    与安卓版一致：
-    - 以 power_good_on 建立会话，不再靠 300 秒间隔猜测
-    - power_good_off 也进入“充电板移除”事件并标记会话结束
-    - 所有电流变化 / open path 事件都保留
-    - 只保留最新 1 个会话，每个会话最多 100 条事件
+    无线以 power_good_on/off 建立边界；有线以 usb online 1/0 建立边界。
+    只保留最新 1 个会话，并将连续的充电电流设置合并，避免日志刷新把页面撑长。
     """
     sessions: list[dict] = []
     cur: dict | None = None
     open_group: dict | None = None
+    ichg_group: dict | None = None
     open_first_ibus = 0
     open_count = 0
+    ichg_first_ma = 0
+    ichg_count = 0
     for line in text.splitlines():
         tm = VOTE_TIME_RE.search(line)
         ev = classify_session_line(line)
@@ -1311,12 +1316,16 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
             continue
         t = shift_log_time(tm.group(1), offset_minutes)
         kind, label, detail = ev
-        if kind == "on":
-            # 新的 power_good_on 到来时，把上一个未结束会话标为结束
+        if kind in ("on", "wired_on"):
+            source = "wired" if kind == "wired_on" else "wireless"
+            # 同一来源的重复 online/power_good 只刷新边界，不生成空会话。
+            if cur is not None and not cur["ended"] and cur.get("source") == source:
+                continue
+            # 新输入源到来时封口上一个未结束会话。
             if cur is not None and not cur["ended"]:
                 cur["ended"] = True
             cur = {
-                "start": t, "ended": False, "events": [],
+                "start": t, "ended": False, "source": source, "events": [],
                 "uuid": None, "tx_adapter": None, "fc_flag": None,
                 "opens": 0, "smartendura": False,
                 "peak_limit_ma": None, "final_limit_ma": None,
@@ -1324,6 +1333,8 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
             sessions.append(cur)
             open_group = None
             open_count = 0
+            ichg_group = None
+            ichg_count = 0
             cur["events"].append({"kind": kind, "time": t, "label": label, "detail": detail})
             continue
         if cur is None:
@@ -1332,10 +1343,17 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
         if kind != "open":
             open_group = None
             open_count = 0
-        if kind == "off":
+        if kind != "ichg":
+            ichg_group = None
+            ichg_count = 0
+        if kind in ("off", "wired_off"):
+            matches = ((kind == "off" and cur.get("source") == "wireless")
+                       or (kind == "wired_off" and cur.get("source") == "wired"))
+            if not matches:
+                continue
             cur["ended"] = True
             evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
-            # 断开后不再向已结束会话追加日志
+            # 断开后不再向已结束会话追加日志；后续输入边界会建立新会话。
             cur = None
             continue
         elif kind == "auth":
@@ -1354,8 +1372,16 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
             cur["fc_flag"] = detail
             evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
         elif kind == "ichg":
-            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
             v = int(detail)
+            if ichg_group is None:
+                ichg_first_ma = v
+                ichg_count = 1
+                ichg_group = {"kind": kind, "time": t, "label": label,
+                              "detail": f"{v}mA"}
+                evs.append(ichg_group)
+            else:
+                ichg_count += 1
+                ichg_group["detail"] = f"{ichg_first_ma}→{v}mA · {ichg_count}次"
             if cur["peak_limit_ma"] is None or v > cur["peak_limit_ma"]:
                 cur["peak_limit_ma"] = v
             cur["final_limit_ma"] = v
@@ -1381,7 +1407,7 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
     while len(sessions) > 1:
         sessions.pop(0)
     for s in sessions:
-        while len(s["events"]) > 100:
+        while len(s["events"]) > 40:
             s["events"].pop(0)
     return sessions
 
