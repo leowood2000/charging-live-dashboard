@@ -812,7 +812,10 @@ function renderVoters(d) {
   const battSt = (d.battery && d.battery.status && d.battery.status.value || "").toLowerCase();
   const chargingNow = battSt === "" ? true : battSt === "charging";
   const wirelessCharging = chargingNow && wirelessActive;
-  const wiredActive = inputSrc === "wired" || !!(d.derived && d.derived.wired_online);
+  // 后端一旦明确选择 wireless，就不能再用残留 wired_online 把有线 CP 卡显示出来。
+  const wiredActive = inputSrc
+    ? inputSrc === "wired"
+    : !!(d.derived && d.derived.wired_online);
   const wiredCharging = chargingNow && wiredActive;
   // 日志数据年龄：投票/仲裁来自低频日志周期，可能与快速 KPI 短暂不一致
   const logsAge = d.meta && d.meta.logs_updated_at
@@ -863,6 +866,7 @@ function renderVoters(d) {
     }
     if (wiredActive) {
       const wcp = (d.derived && d.derived.wired_cp) || {};
+      const wiredPathFresh = !(d.meta && d.meta.power_path_logs_stale);
       // 无线相关表有线时无效
       if (t.startsWith("wireless_")) return false;
       if (wcp.state === "cp") {
@@ -879,6 +883,10 @@ function renderVoters(d) {
       } else {
         // Buck 或未知：隐藏全部 CP 分压表
         if (WIRED_CP_TOPICS.has(t)) return false;
+        // 只有路径明确为 Buck 且功率路径日志新鲜时，Buck 输入/FCC 才属于当前路径；
+        // unknown 或陈旧路径下仅保留摘要的待确认状态，不展示旧票卡。
+        if ((t === "buck_input" || t === "buck_charge_curr")
+            && (wcp.state !== "buck" || !wiredCharging || !wiredPathFresh)) return false;
       }
     }
     const b = topics[t];
@@ -989,6 +997,7 @@ function renderVoters(d) {
     }
     if (wiredActive) {
       const wcp = (d.derived && d.derived.wired_cp) || {};
+      const wiredPathFresh = !(d.meta && d.meta.power_path_logs_stale);
       const ppStaleD = d.meta && d.meta.power_path_logs_stale;
       let wPath;
       let staleD = "";
@@ -1008,76 +1017,61 @@ function renderVoters(d) {
       if (ceStopping || ceStopped) {
         const stopLabel = ceStopping ? "停止中" : "已停止";
         summary.push(`<span class="chip" title="输入仍连接，但 chg_enable 已 OFF；停止阶段不再展示可能滞后的 CP/Buck 上限">当前电池充电电流上限<b>--</b><small>${stopLabel}</small></span>`);
-        if (battMa !== null && battMa !== undefined) {
-          summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b id="limitBattCurrent">${battMa > 0 ? "+" : ""}${fmt(battMa, 0)}mA</b><small>battery</small></span>`);
-        }
       } else if (wcp.state === "cp") {
-        // 有线 CP：Quick Charge 算法目标（1611 型 cur_max 优先，1597 型阶段值兜底），绝不用 buck_charge_curr 顶替
-        const wd = wcp.cur_max && wcp.cur_max.cur_max !== undefined && wcp.cur_max.cur_max !== null
-            ? wcp.cur_max : null;
-          const wst = wcp.stage_cur_max && wcp.stage_cur_max.cur_max !== undefined
-            && wcp.stage_cur_max.cur_max !== null ? wcp.stage_cur_max : null;
-          const curAge = o => (o && o.at) ? Math.max(0, Math.round((Date.now() - o.at) / 1000)) : null;
-          // 按分压比选路径限制表；single/multi 拓扑未确认前不自动二选一
-          const ratio = wcp.ratio;
-          const divSingle = ratio === 4 ? "div4_single"
-            : ratio === 2 ? "div2_single"
-            : ratio === 1 ? "div1_single" : null;
-          const divMulti = ratio === 4 ? "div4_multi"
-            : ratio === 2 ? "div2_multi"
-            : ratio === 1 ? "div1_multi" : null;
-          const limSingle = divSingle ? effectiveOf(topics[divSingle]) : null;
-          const limMulti = divMulti ? effectiveOf(topics[divMulti]) : null;
-          // 算法目标（原始 cur_max，不预先取 min；限制关系由下面两层表达）
-          if (wd) {
-            const age = curAge(wd);
-            summary.push(`<span class="chip" title="mca_quick_charge_select_max_ibat 最终行 cur_max（算法目标，非实测电流，可能被路径限制压住）${wd.log_time ? " · 日志 " + esc(wd.log_time) : ""}">` +
-              `Quick Charge 算法目标<b>${fmt(wd.cur_max, 0)}</b><small>quick_charge cur_max${age !== null ? " · " + age + "s前" : ""}</small></span>`);
-          } else if (wst) {
-            const age = curAge(wst);
-            summary.push(`<span class="chip" title="仅捕获到 mca_quick_charge_select_max_ibat 阶段行，等待最终调节值${wst.log_time ? " · 日志 " + esc(wst.log_time) : ""}">` +
-              `阶段算法目标<b>${fmt(wst.cur_max, 0)}</b><small>cur_stage${age !== null ? " · " + age + "s前" : ""} · 等待最终调节值</small></span>`);
+        // 有线 CP：当前限制只显示当前分压路径的 mca_thermal 上限；
+        // Quick Charge cur_max 是算法目标，保留在详情数据中，不冒充路径上限。
+        const ratio = wcp.ratio;
+        const divSingle = ratio === 4 ? "div4_single"
+          : ratio === 2 ? "div2_single"
+          : ratio === 1 ? "div1_single" : null;
+        const divMulti = ratio === 4 ? "div4_multi"
+          : ratio === 2 ? "div2_multi"
+          : ratio === 1 ? "div1_multi" : null;
+        const limSingle = divSingle ? effectiveOf(topics[divSingle]) : null;
+        const limMulti = divMulti ? effectiveOf(topics[divMulti]) : null;
+        let cpLimit = null;
+        let cpLimitSource = "";
+        let cpLimitNote = "";
+        if (limSingle && limMulti) {
+          if (limSingle.value === limMulti.value) {
+            cpLimit = limSingle;
+            cpLimitSource = `${divSingle}/${divMulti} · mca_thermal`;
           } else {
-            summary.push(`<span class="chip" title="有线 CP 已确认，但尚未捕获 quick_charge cur_max">Quick Charge 算法目标<b>--</b><small>待刷新</small></span>`);
+            cpLimitNote = `${divSingle}=${fmt(limSingle.value, 0)} / ${divMulti}=${fmt(limMulti.value, 0)} · 拓扑待确认`;
           }
-          // CP 路径限制：single/multi 同值视为共同上限，异值并列展示并标拓扑待确认
-          const pushLim = (lim, topic, extra) => {
-            if (!lim) return;
-            summary.push(`<span class="chip" title="${topic} 投票上限（CP 路径约束，非最终充电目标）">` +
-              `CP ${ratio || ""}:1 路径限制<b>${fmt(lim.value, 0)}</b><small>${esc(lim.client)} · ${topic}${extra || ""}</small></span>`);
-          };
-          if (limSingle && limMulti) {
-            if (limSingle.value === limMulti.value) {
-              pushLim(limSingle, divSingle + "/" + divMulti);
-            } else {
-              pushLim(limSingle, divSingle, " · 拓扑待确认");
-              pushLim(limMulti, divMulti, " · 拓扑待确认");
-            }
-          } else {
-            pushLim(limSingle || limMulti, (limSingle ? divSingle : divMulti));
-          }
-          // 综合有效上限：仅当路径限制可确定（单一表，或双表同值）时才推算 min
-          const rawTarget = wd ? wd.cur_max : (wst ? wst.cur_max : null);
-          const knownLim = limSingle && limMulti
-            ? (limSingle.value === limMulti.value ? limSingle : null)
-            : (limSingle || limMulti);
-          if (rawTarget !== null && knownLim) {
-            const eff = Math.min(rawTarget, knownLim.value);
-            const capped = knownLim.value < rawTarget;
-            summary.push(`<span class="chip" title="min(quick_charge cur_max ${rawTarget}mA, ${knownLim.value}mA) = ${eff}mA（推算，非驱动直接输出）">` +
-              `综合有效上限<b>${fmt(eff, 0)}</b><small>推算${capped ? " · 受路径限制约束" : " · cur_max 主导"}</small></span>`);
-          } else if (rawTarget !== null && limSingle && limMulti && limSingle.value !== limMulti.value) {
-            summary.push(`<span class="chip" title="single/multi 两张表值不同，无法确定当前生效路径限制，不做推算">综合有效上限<b>--</b><small>single/multi 拓扑待确认</small></span>`);
-          } else if (rawTarget !== null && !divSingle) {
-            summary.push(`<span class="chip" title="分压比未知，无法选择对应 div 限制表，不做推算">综合有效上限<b>--</b><small>分压比待确认</small></span>`);
-          }
-        if (battMa !== null && battMa !== undefined) {
-          summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b id="limitBattCurrent">${battMa > 0 ? "+" : ""}${fmt(battMa, 0)}mA</b><small>battery</small></span>`);
+        } else if (limSingle || limMulti) {
+          const lim = limSingle || limMulti;
+          cpLimit = lim;
+          cpLimitSource = `${limSingle ? divSingle : divMulti} · mca_thermal`;
+        } else if (!ratio) {
+          cpLimitNote = "分压比待确认";
+        } else {
+          cpLimitNote = "当前无生效热控票";
+        }
+        if (cpLimit) {
+          summary.push(`<span class="chip" title="当前 CP 分压路径的 mca_thermal 电池侧上限；不使用 Quick Charge 算法目标替代">当前 CP 路径电池上限<b>${fmt(cpLimit.value, 0)}mA</b><small>${esc(cpLimitSource)}</small></span>`);
+        } else {
+          summary.push(`<span class="chip" title="无法唯一确定当前 CP 分压路径的 mca_thermal 上限">当前 CP 路径电池上限<b>--</b><small>${esc(cpLimitNote)}</small></span>`);
         }
       } else {
-        // 有线 Buck / 待确认：USB 输入侧 ICL + 电池侧 FCC
-        addSummary("有线输入限流", effectiveOf(topics.buck_input), v => `${v}mA`);
-        addSummary("电池充电上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+        // 只有明确且新鲜的 Buck 路径才采用 Buck 输入 ICL/FCC；普通 USB 慢充仍属于此分支。
+        const buckPathActive = wcp.state === "buck" && wiredCharging && wiredPathFresh;
+        if (buckPathActive) {
+          addSummary("有线输入限流", effectiveOf(topics.buck_input), v => `${v}mA`);
+          addSummary("有线电池充电上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+        } else {
+          const reason = wcp.state === "unknown" || !wiredPathFresh ? "路径待确认" : "当前未充电";
+          summary.push(`<span class="chip" title="Buck 输入 ICL 只在明确且新鲜的有线 Buck 充电路径下作为当前限制；普通 USB 慢充属于 Buck，CP/未知路径不沿用旧票">有线输入限流<b>--</b><small>${reason}</small></span>`);
+          summary.push(`<span class="chip" title="Buck FCC 只在明确且新鲜的有线 Buck 充电路径下作为当前电池上限；CP/未知路径不沿用旧值">有线电池充电上限<b>--</b><small>${reason}</small></span>`);
+        }
+      }
+      if (battMa !== null && battMa !== undefined) {
+        summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b id="limitBattCurrent">${battMa > 0 ? "+" : ""}${fmt(battMa, 0)}mA</b><small>battery</small></span>`);
+      }
+      const wiredIbus = d.derived && d.derived.wired_ibus_ma;
+      if (Number.isFinite(Number(wiredIbus))) {
+        const wiredSource = d.derived.wired_input_source || "wired_input";
+        summary.push(`<span class="chip" title="有线输入侧实时电流；Buck/待确认来自 USB uevent，CP 路径来自 ibus_total，不代表转换器输出电流">有线输入实测<b>${fmt(wiredIbus, 0)}mA</b><small>${esc(srcText(wiredSource))}</small></span>`);
       }
     } else if (wirelessActive) {
       // 无线协议控制域（前级）与后级 Buck/CP 路径是独立维度：
@@ -1190,7 +1184,7 @@ function renderVoters(d) {
     if (/当前电池充电电流上限|电池充电上限|综合有效上限|Quick Charge 算法目标/.test(html)) return 10;
     if (/实际电池电流/.test(html)) return 20;
     if (/无线(?:平台)?输入 ICL|有线输入限流/.test(html)) return 30;
-    if (/实际 RX 输出|实际输入电流/.test(html)) return 40;
+    if (/实际 RX 输出|实际输入电流|有线输入实测/.test(html)) return 40;
     if (/温度与热控|无线热控上限/.test(html)) return 50;
     if (/当前热控场景/.test(html)) return 55;
     if (/充电使能|充电状态/.test(html)) return 60;
@@ -1201,7 +1195,7 @@ function renderVoters(d) {
     if (/充电路径|当前功率路径/.test(html)) cls = "summary-path";
     else if (/无线(?:平台)?输入 ICL|有线输入限流/.test(html)) cls = "summary-primary summary-input-limit";
     else if (/当前电池充电电流上限|电池充电上限|综合有效上限|Quick Charge 算法目标/.test(html)) cls = "summary-primary";
-    else if (/实际 RX 输出|实际输入电流/.test(html)) cls = "summary-secondary summary-input-actual";
+    else if (/实际 RX 输出|实际输入电流|有线输入实测/.test(html)) cls = "summary-secondary summary-input-actual";
     else if (/实际电池电流/.test(html)) cls = "summary-secondary summary-battery-actual";
     return cls ? html.replace('class="chip', `class="chip ${cls}`) : html;
   };
