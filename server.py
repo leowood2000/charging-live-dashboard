@@ -89,6 +89,15 @@ def cp_ibus_owner(input_source: str, cp_ibus_ma: float | None) -> str:
     return input_source if input_source in ("wired", "wireless") else "none"
 
 
+def resolve_wireless_connected(latched: bool | None,
+                               input_source: str,
+                               vout_mv: float | None) -> bool:
+    """Keep pad presence independent from low/zero RX activity current."""
+    if latched is not None:
+        return latched
+    return input_source == "wireless" or (vout_mv is not None and vout_mv > 1000)
+
+
 def _detect_version() -> str:
     """Git short hash（启动时的版本标识），失败时返回 dev。"""
     try:
@@ -1371,6 +1380,8 @@ class Sampler:
         self.last_smartendura_soc_limit: bool = False
         # 最后一条 power_good_on 的归一化毫秒，用于识别“新无线会话”
         self.last_wls_session_ms: int | None = None
+        # 无线充电板物理连接状态：由 power_good_on/off 锁存，不随 iout 阈值抖动
+        self.last_wireless_connected: bool | None = None
         # 日志行 stable key：同一行重复扫描不刷新 at（log_time + 关键值）
         self.last_cur_decision_key: tuple | None = None
         self.last_wired_cur_max_key: tuple | None = None
@@ -1528,10 +1539,13 @@ class Sampler:
                 or "soc_limit_workfunc" in line
                 for line in session_log.splitlines())
             if is_last_wireless_power_off(session_log):
+                self.last_wireless_connected = False
                 # 无线已断开：清掉全部无线会话状态，避免上一会话的值继续显示
                 self._clear_wireless_session_state()
                 self.last_wls_session_ms = None
             else:
+                if "wireless power_good_on" in session_log:
+                    self.last_wireless_connected = True
                 # 所有无线执行层数据统一按最近一次 power_good_on 截断，
                 # 避免上一会话的 ICL/buck_fcc 混进新会话
                 wtail = split_after_last_wireless_attach(session_log)
@@ -1580,6 +1594,7 @@ class Sampler:
                 and (self.last_wls_session_ms is None
                      or pg_ms_pp > self.last_wls_session_ms))
             if pp_off:
+                self.last_wireless_connected = False
                 # pp 通道明确断开（session 通道失败时的兜底）：清无线 CP/quick 状态
                 self.last_cp_mode = None
                 self.last_cp_work_mode = None
@@ -1590,6 +1605,7 @@ class Sampler:
                 self.last_quick_cur_max = None
                 self.last_wls_session_ms = None
             elif pp_new_session:
+                self.last_wireless_connected = True
                 # 真正的新无线会话边界：统一清空 wireless-session scoped 状态，
                 # 本轮 pp 有新证据再重新填（避免旧 Final 串进新会话）
                 self.last_wls_session_ms = pg_ms_pp
@@ -2000,6 +2016,8 @@ class Sampler:
         input_source = resolve_input_source(
             usb_online_state, usb_vbus_mv, wireless_signal)
         wired_present = input_source == "wired"
+        wireless_connected = resolve_wireless_connected(
+            self.last_wireless_connected, input_source, vout)
 
         wstate = self.last_wired_state
         cp_tel = self.last_wired_cp_tel
@@ -2093,6 +2111,9 @@ class Sampler:
         derived = {
             "vout": vout, "vrect": wls.get("vrect"), "iout": iout,
             "input_source": input_source,
+            "wireless_connected": wireless_connected,
+            "wired_connected": wired_present,
+            "input_connected": wired_present or wireless_connected,
             "input_detail_source": (
                 rt_source if input_source == "wired"
                 else "wls_debug" if input_source == "wireless" else None

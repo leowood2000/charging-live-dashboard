@@ -4,6 +4,12 @@
 
 Android 独立版见 [charging-live-dashboard-android](https://github.com/leowood2000/charging-live-dashboard-android)。两版的数据语义保持一致。
 
+## v0.11.16 重点改进
+
+- 新增 `wireless_connected` 会话锁存：`power_good_on/off` 决定充电板连接，低 RX 电流只影响 `input_source`，不再让停充旁路的当前限制卡反复消失。
+- 无线停充时保持旁路上下文，实际 RX 输出仍按实时值更新；拔离充电板后才清除连接状态。
+- 新增连接状态回归测试，覆盖低电流旁路、断开后残留 vout 和未知状态回退。
+
 ## v0.11.15 重点改进
 
 - 修复有线 CP 切换无线 CP 后偶发显示旧有线 `CP 1:1`：`USB ONLINE=0` 现在硬否决有线，残留 VBUS 不再把页面锁进有线分支。
