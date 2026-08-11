@@ -768,7 +768,8 @@ WIRED_FINAL_CUR_MAX_RE = re.compile(
 def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     """无线/有线 CP 状态彻底解耦：
     - power_good 只重置无线 track；usb online / real_type changed 只重置有线 track
-    - SC8581 operation mode 只有在对应 quickchg 上下文出现后才写入对应 track
+    - 无线 operation mode 仍要求无线 quickchg 上下文；
+      有线日志中的 sc8581_set_operation_mode 不带 quickchg 上下文前缀，按最近有线边界识别
     """
     # 无线 track（power_good 边界）
     w_cp_mode: int | None = None
@@ -789,10 +790,12 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     d_ctx = False
     d_cur_max: dict | None = None
     d_stage_cur_max: dict | None = None
+    last_boundary_kind: str | None = None
     seq = 0
     for line in text.splitlines():
         seq += 1
         if "power_good_on" in line or "power_good_off" in line:
+            last_boundary_kind = "wireless"
             w_boundary = True
             w_cp_mode = None
             w_cp_work_mode = None
@@ -803,6 +806,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
             continue
         if ("usb online: 0" in line or "usb online: 1" in line
                 or "real_type changed:" in line):
+            last_boundary_kind = "wired"
             d_boundary = True
             d_cp_mode = None
             d_cp_mode_seq = -1
@@ -827,11 +831,19 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
         m = re.search(r"set operation mode (\d+)", line)
         if m:
             n = int(m.group(1))
-            if w_ctx:
+            if w_ctx and last_boundary_kind == "wireless":
                 w_cp_mode = n
-            if d_ctx:
+            elif d_ctx and last_boundary_kind == "wired":
                 d_cp_mode = n
                 d_cp_mode_seq = seq
+            elif "sc8581_set_operation_mode" in line and last_boundary_kind == "wired":
+                # 有线日志的 cp_sc8581 行没有 mca_quick_charge_/strategy_quickchg_ 前缀，
+                # 仅依赖 d_ctx 会把明确的 mode=1 丢掉，随后被 buckchg 行误判为 Buck。
+                d_cp_mode = n
+                d_cp_mode_seq = seq
+                op_ratio = re.search(r"work_mode\s+(\d+)", line)
+                if op_ratio:
+                    d_cp_ratio = int(op_ratio.group(1))
             continue
         m = re.search(r"mca_wireless_quick_charge_select_cur_work_mode:.*work_mode=(\d+)", line)
         if m:
@@ -1306,6 +1318,8 @@ class Sampler:
         self.last_cp_mode: int | None = None
         # quick wireless 电荷泵分压比 work_mode（1/2/4）
         self.last_cp_work_mode: int | None = None
+        # 低电流时允许保留 CP 的唯一依据：必须来自当前 power_good 会话
+        self.last_wls_cp_evidence = False
         # 最近一次无线 work_mode 变化行的归一化日志毫秒（跨文件单调）
         self.last_wls_work_mode_ms: int | None = None
         # 当前读取的 mca 日志文件名，用于日志时间归一化
@@ -1549,6 +1563,7 @@ class Sampler:
                 # pp 通道明确断开（session 通道失败时的兜底）：清无线 CP/quick 状态
                 self.last_cp_mode = None
                 self.last_cp_work_mode = None
+                self.last_wls_cp_evidence = False
                 self.last_wls_work_mode_ms = None
                 self.last_cur_decision = None
                 self.last_cur_decision_key = None
@@ -1621,8 +1636,13 @@ class Sampler:
                         # 明确切到 Buck：清掉旧 work_mode，避免页面永远保持 CP
                         self.last_cp_work_mode = None
                         self.last_wls_work_mode_ms = None
+                        self.last_wls_cp_evidence = False
+                    elif w_cp_mode > 0:
+                        self.last_wls_cp_evidence = True
                 if w_cp_work_mode is not None:
                     self.last_cp_work_mode = w_cp_work_mode
+                    if w_cp_work_mode in (1, 2, 4):
+                        self.last_wls_cp_evidence = True
                     if w_cp_work_mode_ms is not None:
                         self.last_wls_work_mode_ms = w_cp_work_mode_ms
                 if w_decision is not None:
@@ -1638,8 +1658,13 @@ class Sampler:
                         # 明确切到 Buck：清掉旧 work_mode，避免页面永远保持 CP
                         self.last_cp_work_mode = None
                         self.last_wls_work_mode_ms = None
+                        self.last_wls_cp_evidence = False
+                    elif w_cp_mode > 0:
+                        self.last_wls_cp_evidence = True
                 if w_cp_work_mode is not None:
                     self.last_cp_work_mode = w_cp_work_mode
+                    if w_cp_work_mode in (1, 2, 4):
+                        self.last_wls_cp_evidence = True
                     if w_cp_work_mode_ms is not None:
                         self.last_wls_work_mode_ms = w_cp_work_mode_ms
                 if w_decision is not None:
@@ -1713,6 +1738,7 @@ class Sampler:
         self.last_buck_fcc = None
         self.last_cp_mode = None
         self.last_cp_work_mode = None
+        self.last_wls_cp_evidence = False
         self.last_wls_work_mode_ms = None
         self.last_cur_decision = None
         self.last_cur_decision_key = None
@@ -1754,17 +1780,21 @@ class Sampler:
                 derived.get("input_source") == "wireless"
                 and isinstance(cp_ibus, (int, float))
             )
-            wm = self.last_cp_work_mode
+            # 低电流时只接受当前 power_good 会话内捕获的 CP 证据；
+            # 防止慢充新会话沿用上一会话的 operation mode/work_mode。
+            cp_mode = self.last_cp_mode if self.last_wls_cp_evidence else None
+            wm = self.last_cp_work_mode if self.last_wls_cp_evidence else None
             if live_wireless_connected:
                 live_cp_state = classify_wireless_cp_ibus(cp_ibus)
                 cp_state = resolve_wireless_cp_state(
-                    cp_ibus, self.last_cp_mode, wm)
+                    cp_ibus, cp_mode, wm)
                 cp_active = cp_state == "cp"
                 buck["cp_state"] = cp_state
                 buck["cp_active"] = cp_active
                 buck["cp_state_source"] = (
                     "sysfs_cp_ibus_total+session_cp_mode"
                     if live_cp_state != cp_state else "sysfs_cp_ibus_total")
+                buck["cp_session_evidence"] = bool(self.last_wls_cp_evidence)
                 buck["cp_ibus_total_ma"] = cp_ibus
                 if cp_active and wm is not None:
                     buck["cp_ratio"] = wm
@@ -1773,17 +1803,20 @@ class Sampler:
                 buck["cp_ratio"] = wm
                 buck["cp_active"] = True
                 buck["cp_state_source"] = "quick_wireless_work_mode"
-            elif self.last_cp_mode is not None:
-                cp_active = self.last_cp_mode > 0
+                buck["cp_session_evidence"] = bool(self.last_wls_cp_evidence)
+            elif cp_mode is not None:
+                cp_active = cp_mode > 0
                 buck["cp_state"] = "cp" if cp_active else "buck"
                 buck["cp_active"] = cp_active
                 buck["cp_state_source"] = "sc8581_operation_mode"
+                buck["cp_session_evidence"] = bool(self.last_wls_cp_evidence)
                 if cp_active and wm is not None:
                     buck["cp_ratio"] = wm
             else:
                 buck["cp_state"] = "unknown"
                 buck["cp_active"] = False
                 buck["cp_state_source"] = "none"
+                buck["cp_session_evidence"] = bool(self.last_wls_cp_evidence)
             if self.last_wls_work_mode_ms is not None:
                 buck["wls_work_mode_ms"] = self.last_wls_work_mode_ms
             if self.last_cur_decision is not None:
@@ -2006,8 +2039,20 @@ class Sampler:
             if wired_online else None
         )
 
-        # 当前输入源抽象层：有线优先（避免旧无线残留值覆盖），无输入时为 none
-        if wired_online:
+        # 当前输入源抽象层：无线已出现有效 RX 电流时，不能让拔线瞬间残留的
+        # USB ONLINE/旧 CP 遥测继续把页面锁在有线 CP 分支。
+        wireless_signal = (
+            vout is not None and iout is not None
+            and vout > 1000 and iout > 100)
+        stale_wired_shell = (
+            wired_online and wireless_signal
+            and (rt_ibus_ma is None or rt_ibus_ma < 100))
+        if wireless_signal and (not wired_online or stale_wired_shell):
+            input_source = "wireless"
+            input_vol_mv = vout
+            input_cur_ma = iout
+            input_power = wireless_power
+        elif wired_online:
             input_source = "wired"
             input_vol_mv = rt_vbus_mv
             input_cur_ma = rt_ibus_ma

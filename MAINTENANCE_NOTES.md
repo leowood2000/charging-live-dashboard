@@ -1,6 +1,6 @@
 # 维护与跨会话交接说明
 
-最后更新：2026-08-10，目标发布版本：v0.11.12。
+最后更新：2026-08-11，目标发布版本：v0.11.13。
 
 本文是 Web 与 Android 两个仓库的共同维护上下文。重新开始会话或修改充电语义前，先阅读本文件；不要仅凭变量名推测硬件含义。
 
@@ -50,7 +50,8 @@
 - `wired_online` 必须由实时 USB `ONLINE=1` 或 `VBUS>1V` 证明；CP `ibus_total` 和策略日志遥测只能补充电流/电压，不能单独证明仍插线。否则拔掉有线 CP 后残留的 0V/小电流或旧 regulation 行会制造幽灵有线连接。
 - `buck_5v_in / buck_5v_ich / buck_9v_in / buck_9v_ich` 是四张独立的有线 Buck 档位表，不得在无线、未连接、有线 CP 或路径待确认时当作当前投票展示。仅当有线 Buck 已确认且实时 VBUS 有效时，按 `<7V → 5V 档`、`≥7V → 9V 档`显示对应的 `in + ich` 两张表；真正总仲裁仍以 `buck_input / buck_charge_curr` 为准。
 - `work_mode=1/2/4` 分别对应 1:1、2:1、4:1 CP；明确 `operation mode=0` 表示 Buck。
-- CP 路径的当前电池充电电流上限取 Quick Wireless `cur_max:[Final]`。
+- 无线 CP 路径的当前电池充电电流上限取手机原生 Quick Wireless `cur_max:[Final]`。
+- 有线 CP 路径按当前分压比选择 `div1/div2/div4` 的 `mca_thermal` 上限；single/multi 同值时使用共同值，只有一侧有当前有效结果时使用该侧，二者异值且拓扑未知时显示“待确认”。有线 Quick Charge `cur_max` 只保留作诊断目标，不进入首页当前路径上限。
 - Buck 路径取 `buck_charge_curr effective`。未捕获时必须显示 `-- / 待捕获`，不能整项消失。
 - 路径不确定时显示“待确认”，不能用 Buck FCC 兜底冒充当前上限。
 - 无线/有线 SC8581 会话状态必须隔离；无线 `power_good` 不应重置有线 track，反之亦然。
