@@ -1,6 +1,12 @@
 # 维护与跨会话交接说明
 
-最后更新：2026-08-11，目标发布版本：v0.11.18。
+最后更新：2026-08-11，目标发布版本：v0.11.19。
+
+## v0.11.19 有线热控合并与共享 FCC 归属
+
+- 有线 CP/Buck 首页上限为 MONITOR-BAT 路径票与 SIC-BAT `wired_chg_curr` 的较小值；这只是有线热控上限，Quick Charge `cur_max` 仍仅作诊断。
+- `buck_charge_curr` 不属于单一输入域：不随有线断开整体清理，并以 VOTER 表时间不早于当前有线/无线会话边界作为首页使用条件。
+- 温度摘要按当前路径取证，禁止从所有缓存 thermal/JEITA 票中任意挑选。
 
 ## v0.11.18 投票滑窗与无线路径解耦
 
@@ -63,7 +69,7 @@
 ### 其他投票语义
 
 - `xm_wls` 是无线能力/适配器允许值，不等同当前仲裁 winner。
-- `buck_charge_curr` 的 `MIN_ASSUMED` 是项目假设，只能在详情中标“参考推算”；没有驱动 effective 时不能冒充首页最终上限。
+- `buck_charge_curr` 的 `MIN_ASSUMED` 是项目假设，只能在详情中标“参考推算”；没有驱动 effective 时不能冒充首页最终上限。它还是有线/无线共用 topic：缓存可跨日志窗口保留，但首页仅在其表时间不早于当前输入会话边界时使用，禁止在任一单侧断开时整体清除。
 - 预置的 `wireless_auth_*`、`wireless_bpp*`、`wireless_epp_in` 表会批量出现，不代表当前充电板/协议，首页和主要投票卡保持隐藏。
 - `effective vote is now` 必须经过当前主题仍有启用票的有效性检查，断开后不能继续展示旧结果。
 
@@ -73,12 +79,12 @@
 - 自动停充阶段由 `charge_enable=0` 和实际电池电流直接覆盖显示为“停止中/已停止”，不展示停充前 CP/Buck 结论；无线断开或节点缺失时才按既有边界规则回退当前会话日志。
 - 输入仍连接且 `chg_enable=0` 时，电流尚未降至 `300mA` 内显示“停止中”，降至 `≤300mA` 后显示“已停止”；两个阶段的当前电池上限都显示 `--`，不得回显旧 CP/Buck 目标。输入完全断开后不得用缓存的 OFF 票维持停充态，否则放电电流跨越阈值会造成充电项闪现。
 - 无线仍保持有效 RX 输入而电池停充时属于旁路供电：当前会话的 `wireless_buck_input effective` 继续显示为“无线输入 ICL（旁路）”，但不作为电池或 CP 的直接限流结论；断开无线或新会话尚未捕获 ICL 时才显示 `-- / 待捕获`。
-- `wired_online` 必须由实时 USB `ONLINE=1` 或 `VBUS>1V` 证明；CP `ibus_total` 和策略日志遥测只能补充电流/电压，不能单独证明仍插线。否则拔掉有线 CP 后残留的 0V/小电流或旧 regulation 行会制造幽灵有线连接。
+- `USB ONLINE=1` 直接证明有线；`ONLINE=0` 是硬否决，残留 VBUS 不得推翻；仅 `ONLINE` 缺失/空值时才允许 `VBUS>1V` 回退。CP `ibus_total` 和策略日志遥测只能补充电流/电压，不能单独证明仍插线。
 - `buck_5v_in / buck_5v_ich / buck_9v_in / buck_9v_ich` 是四张独立的有线 Buck 档位表，不得在无线、未连接、有线 CP 或路径待确认时当作当前投票展示。仅当有线 Buck 已确认且实时 VBUS 有效时，按 `<7V → 5V 档`、`≥7V → 9V 档`显示对应的 `in + ich` 两张表；真正总仲裁仍以 `buck_input / buck_charge_curr` 为准。
 - `work_mode=1/2/4` 分别对应 1:1、2:1、4:1 CP；明确 `operation mode=0` 表示 Buck。
 - 无线 CP 路径的当前电池充电电流上限取手机原生 Quick Wireless `cur_max:[Final]`。
-- 有线 CP 路径按当前分压比选择 `div1/div2/div4` 的 `mca_thermal` 上限；single/multi 同值时使用共同值，只有一侧有当前有效结果时使用该侧，二者异值且拓扑未知时显示“待确认”。有线 Quick Charge `cur_max` 只保留作诊断目标，不进入首页当前路径上限。
-- Buck 路径取 `buck_charge_curr effective`。未捕获时必须显示 `-- / 待捕获`，不能整项消失。
+- 有线 CP 路径按当前分压比选择 `div1/div2/div4` 的 MONITOR-BAT `mca_thermal` 上限；Buck 路径取 `buck_charge_curr effective`。两者再与 SIC-BAT `wired_chg_curr`（µA→mA，正值才有效）的动态 PID 上限取较小值，显示为“当前电池充电上限”。它是有线**热控**上限，不等同完整 Quick Charge 最终算法目标；`cur_max` 继续只在详情诊断。single/multi 异值且拓扑未知时保持“待确认”。
+- 温度摘要必须按当前输入源/路径取证：有线 CP 仅看选中的 div 票与 SIC-BAT，有线 Buck 仅看本会话 Buck FCC/SIC-BAT，无线 CP 只看 Quick Wireless `sw_thermal_ichg`，无线 Buck 只看 `wireless_thermal_*`。禁止从所有缓存 topic 中挑第一张 thermal/jeita 票。
 - 路径不确定时显示“待确认”，不能用 Buck FCC 兜底冒充当前上限。
 - 无线/有线 SC8581 会话状态必须隔离；无线 `power_good` 不应重置有线 track，反之亦然。
 

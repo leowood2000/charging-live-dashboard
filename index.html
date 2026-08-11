@@ -945,6 +945,33 @@ function renderVoters(d) {
   };
   const buck = topics.wireless_buck_input;
   const wirelessPath = (d.derived && d.derived.wireless_path) || {};
+  // buck_charge_curr 是有线/无线共用 topic。增量缓存允许它长期存在，但首页只能
+  // 使用本次输入会话之后出现过的表，避免切换时把另一条支路的 FCC 当成当前上限。
+  const topicCurrentSession = (block, sessionAt) => {
+    const session = Number(sessionAt || 0);
+    if (!session) return true; // 兼容旧后端快照
+    const at = Number(block && block.at);
+    return Number.isFinite(at) && at >= session;
+  };
+  const effectiveBuckFccForSession = sessionAt => {
+    const block = topics.buck_charge_curr;
+    return topicCurrentSession(block, sessionAt) ? effectiveOf(block) : null;
+  };
+  const wiredSicRaw = Number(d.derived && d.derived.wired_sic_limit_ma);
+  const wiredSicLimit = Number.isFinite(wiredSicRaw) && wiredSicRaw > 0
+    ? wiredSicRaw : null;
+  const addWiredThermalLimit = (label, pathLimit, pathSource) => {
+    if (!pathLimit && wiredSicLimit === null) return false;
+    const pathValue = pathLimit ? Number(pathLimit.value) : null;
+    const useSic = wiredSicLimit !== null && (pathValue === null || wiredSicLimit < pathValue);
+    const value = useSic ? wiredSicLimit : pathValue;
+    const sources = [];
+    if (pathLimit) sources.push(pathSource);
+    if (wiredSicLimit !== null) sources.push("SIC-BAT");
+    summary.push(`<span class="chip" title="有线热控上限取当前路径 MONITOR-BAT 票与 SIC-BAT 动态 PID 上限中的较小值；协议、曲线与安全等其他算法层仍由驱动处理">` +
+      `${label}<b>${fmt(value, 0)}mA</b><small>${esc(sources.join(" + "))}</small></span>`);
+    return true;
+  };
   const battMa = d.derived && d.derived.batt_current_ma;
   // 充电生效三态只在输入仍连接时成立；完全断开后不能让缓存的 OFF 票
   // 随放电电流跨越阈值而反复冒充“刚停充”。
@@ -1057,16 +1084,22 @@ function renderVoters(d) {
           cpLimitNote = "当前无生效热控票";
         }
         if (cpLimit) {
-          summary.push(`<span class="chip" title="当前 CP 分压路径的 mca_thermal 电池侧上限；不使用 Quick Charge 算法目标替代">当前 CP 路径电池上限<b>${fmt(cpLimit.value, 0)}mA</b><small>${esc(cpLimitSource)}</small></span>`);
+          addWiredThermalLimit("当前电池充电上限", cpLimit, cpLimitSource);
+        } else if (addWiredThermalLimit("当前电池充电上限", null, "")) {
+          // 当前分压表尚未捕获时，SIC-BAT 仍是驱动已发布的独立热控上限。
         } else {
-          summary.push(`<span class="chip" title="无法唯一确定当前 CP 分压路径的 mca_thermal 上限">当前 CP 路径电池上限<b>--</b><small>${esc(cpLimitNote)}</small></span>`);
+          summary.push(`<span class="chip" title="无法唯一确定当前 CP 分压路径的 MONITOR-BAT 热控上限，且 SIC-BAT 尚未发布">当前电池充电上限<b>--</b><small>${esc(cpLimitNote)}</small></span>`);
         }
       } else {
         // 只有明确且新鲜的 Buck 路径才采用 Buck 输入 ICL/FCC；普通 USB 慢充仍属于此分支。
         const buckPathActive = wcp.state === "buck" && wiredCharging && wiredPathFresh;
         if (buckPathActive) {
           addSummary("有线输入限流", effectiveOf(topics.buck_input), v => `${v}mA`);
-          addSummary("有线电池充电上限", effectiveOf(topics.buck_charge_curr), v => `${v}mA`);
+          const buckFcc = effectiveBuckFccForSession(wcp.session_at);
+          if (!addWiredThermalLimit("当前电池充电上限", buckFcc,
+              buckFcc ? `${buckFcc.client}${buckFcc.calc ? " · 推算" : ""}` : "")) {
+            summary.push(`<span class="chip" title="Buck 路径已确认，但本会话尚未捕获 buck_charge_curr 或 SIC-BAT 有线热控上限">当前电池充电上限<b>--</b><small>待捕获</small></span>`);
+          }
         } else {
           const reason = wcp.state === "unknown" || !wiredPathFresh ? "路径待确认" : "当前未充电";
           summary.push(`<span class="chip" title="Buck 输入 ICL 只在明确且新鲜的有线 Buck 充电路径下作为当前限制；普通 USB 慢充属于 Buck，CP/未知路径不沿用旧票">有线输入限流<b>--</b><small>${reason}</small></span>`);
@@ -1149,14 +1182,15 @@ function renderVoters(d) {
         // 与本轮 sw_thermal_ichg 不等价（已有真机证据），热控输入在
         // “Quick Wireless 电池电流决策”卡内看 sw_thermal_ichg。
       } else if (wCpState === "buck") {
-        const buckFcc = effectiveOf(topics.buck_charge_curr);
+        const buckFcc = effectiveBuckFccForSession(wirelessPath.session_at);
         if (buckFcc) {
           addSummary("当前电池充电电流上限", buckFcc, v => `${v}mA`);
         } else {
           summary.push(`<span class="chip" title="Buck 路径已确认，但尚未捕获 buck_charge_curr effective">当前电池充电电流上限<b>--</b><small>待捕获</small></span>`);
         }
         // 无线热控上限（Buck）：直接取 buck_charge_curr 中唯一启用的 wireless_thermal_XXw
-        const wThermalRowsB = (topics.buck_charge_curr && topics.buck_charge_curr.rows || [])
+        const wThermalRowsB = topicCurrentSession(topics.buck_charge_curr, wirelessPath.session_at)
+          ? (topics.buck_charge_curr && topics.buck_charge_curr.rows || []) : []
           .filter(r => /^wireless_thermal_(20|30|50|80)w$/.test(r.client) && r.enable === 1 && r.value > 0);
         if (wThermalRowsB.length === 1) {
           const wtb = wThermalRowsB[0];
@@ -1191,21 +1225,41 @@ function renderVoters(d) {
     }
   }
   const th = d.thermal || {};
-  const thermalVotes = [];
-  Object.entries(topics).forEach(([topic, block]) => {
-    (block.rows || []).filter(r => r.enable === 1 && /thermal|jeita/i.test(r.client))
-      .forEach(r => thermalVotes.push({ topic, row: r,
-        winner: resultValid(block) && block.result.client === r.client }));
-  });
-  const thermalWinner = thermalVotes.find(v => v.winner);
-  const thermalCandidate = thermalWinner || thermalVotes[0];
-  const decThermal = wirelessPath.cur_max_decision && wirelessPath.cur_max_decision.sw_thermal_ichg;
-  let thermalEvidence = chargingNow ? "未检测到生效温控票" : "";
-  if (chargingNow && thermalCandidate) {
-    thermalEvidence = `${thermalCandidate.winner ? "限制" : "生效票"} ${thermalCandidate.row.client} ${thermalCandidate.row.value}${topics[thermalCandidate.topic].unit || ""}`;
-  } else if (chargingNow && decThermal !== null && decThermal !== undefined) {
-    thermalEvidence = `Quick Wireless 温控输入 ${decThermal}mA`;
+  // 热控证据必须跟随当前输入源和功率路径。不能从全量缓存 topic 中随意挑第一张
+  // thermal/jeita 票，否则有线与无线切换后会把另一支路的历史票标成“当前限制”。
+  const activeThermalRow = block => (block && block.rows || []).find(r =>
+    r.enable === 1 && /thermal|jeita/i.test(r.client));
+  const thermalParts = [];
+  if (chargingNow && wiredActive) {
+    const wcp = (d.derived && d.derived.wired_cp) || {};
+    if (wcp.state === "cp") {
+      const suffix = wcp.ratio === 4 ? "4" : wcp.ratio === 2 ? "2" : wcp.ratio === 1 ? "1" : null;
+      const block = suffix ? topics[`div${suffix}_single`] : null;
+      const row = activeThermalRow(block);
+      if (row) thermalParts.push(`MONITOR ${row.client} ${row.value}mA`);
+    } else if (wcp.state === "buck") {
+      const block = topicCurrentSession(topics.buck_charge_curr, wcp.session_at)
+        ? topics.buck_charge_curr : null;
+      const row = activeThermalRow(block);
+      if (row) thermalParts.push(`Buck ${row.client} ${row.value}mA`);
+    }
+    if (wiredSicLimit !== null) thermalParts.push(`SIC-BAT ${fmt(wiredSicLimit, 0)}mA`);
+  } else if (chargingNow && wirelessContext) {
+    const wState = wirelessPath.state || (buck && buck.cp_state);
+    if (wState === "cp") {
+      const dec = wirelessPath.cur_max_decision;
+      if (dec && dec.sw_thermal_ichg !== null && dec.sw_thermal_ichg !== undefined) {
+        thermalParts.push(`Quick Wireless 温控输入 ${dec.sw_thermal_ichg}mA`);
+      }
+    } else if (wState === "buck"
+        && topicCurrentSession(topics.buck_charge_curr, wirelessPath.session_at)) {
+      const row = (topics.buck_charge_curr && topics.buck_charge_curr.rows || []).find(r =>
+        r.enable === 1 && /^wireless_thermal_\d+w$/.test(r.client));
+      if (row) thermalParts.push(`${row.client} ${row.value}mA`);
+    }
   }
+  const thermalEvidence = chargingNow
+    ? (thermalParts.length ? thermalParts.join(" · ") : "当前路径未捕获热控票") : "";
   summary.push(`<span class="chip summary-thermal${chargingNow ? " summary-thermal-active" : ""}" title="虚拟温度来自 VIRTUAL-SENSOR-FORMULA，是当前热控决策主温度；电池实体温度在实时数据区单独展示">` +
     `<span class="summary-label">温度与热控</span><b>虚拟 <span id="limitVirtualTemp">${fmt(th.virtual_temp, 1)}°C</span></b>` +
     `${thermalEvidence ? `<small>${esc(thermalEvidence)}</small>` : ""}</span>`);

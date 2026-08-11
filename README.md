@@ -4,6 +4,12 @@
 
 Android 独立版见 [charging-live-dashboard-android](https://github.com/leowood2000/charging-live-dashboard-android)。两版的数据语义保持一致。
 
+## v0.11.19 重点改进
+
+- 有线 CP/Buck 的首页电池上限合并 MONITOR-BAT 路径票与 SIC-BAT `wired_chg_curr`，显示为有线热控上限，不再把单一分压票误称为完整上限。
+- `buck_charge_curr` 作为有线/无线共用 topic 增加会话时间归属检查，切换输入源时宁可显示“待捕获”，也不复用另一支路的旧 FCC。
+- “温度与热控”摘要改为仅从当前输入源/功率路径取证，避免历史无线/有线 thermal 票串到当前页面。
+
 ## v0.11.18 重点改进
 
 - 投票日志改为按 topic 增量合并，某个低频 topic 滑出日志窗口时不再让有线/无线限制值瞬间消失。
@@ -54,9 +60,9 @@ Android 独立版见 [charging-live-dashboard-android](https://github.com/leowoo
 - 无线路径改为实时 `mca_platform_cp/ibus_total` 与当前会话 `operation mode/work_mode` 融合判定：`≥100mA` 为 CP、`20–100mA` 为切换中；`≤20mA` 只有在没有当前会话 CP 证据时才判 Buck，既不把预启动 3–5mA 当成 CP，也不会因 CP 稳态瞬时读到 0 而误判 Buck。
 - mi_thermald 仍只读取 64KB 尾部，但单次提取“最新无线行 + 最新通用虚拟温度行”并缓存最后有效值；空闲启动无需先充电即可显示虚拟温度和热控场景。
 - 会话档案把连续的 `open path ibus` 电流爬升合并成一条“CP 建链”，保留首末电流和次数，不再误导为反复开关快充路径。
-- 输入仍连接但已自动停充时，路径从“停止中”稳定收敛到“已停止”，当前上限不再回显旧 CP/Buck 目标；有线连接必须由实时 USB 在线或有效 VBUS 证明，拔线后不会被缓存日志重新判成有线。
+- 输入仍连接但已自动停充时，路径从“停止中”稳定收敛到“已停止”，当前上限不再回显旧 CP/Buck 目标；`USB ONLINE=0` 明确否决有线，只有 ONLINE 未知时才允许 VBUS 回退，拔线后不会被缓存日志重新判成有线。
 - 日志年龄采用事件真实时间，并正确处理单个日志文件跨午夜；重启采集器不会把旧决策误标成“刚刚”。
-- 当前电池充电电流上限按来源与路径取值：无线 CP 使用手机原生 Quick Wireless `cur_max:[Final]`；有线 CP 使用当前 `div1/div2/div4` 路径的 `mca_thermal` 上限；Buck 使用 `buck_charge_curr effective`。路径或 single/multi 拓扑不能唯一确定时显示“待确认”，不拿其他支路的值冒充结果。
+- 当前电池充电电流上限按来源与路径取值：无线 CP 使用手机原生 Quick Wireless `cur_max:[Final]`；有线 CP/Buck 将当前 MONITOR-BAT 路径票（`div1/div2/div4` 或 `buck_charge_curr`）与 SIC-BAT `wired_chg_curr` 的动态上限取较小值，作为“有线热控上限”。协议、曲线和安全等其他驱动算法层不被伪装成此字段。路径或 single/multi 拓扑不能唯一确定时显示“待确认”。
 - 从有线切换到无线时，实时输入源优先于残留 USB ONLINE/有线 CP 日志，避免无线慢充沿用上一段有线 CP 路径。
 - 无线 CP 总览显示 `RX 输出允许上限` 与 `实际 RX 输出` 两行；两行分别使用与电池上限/实际电流相同的主次高亮颜色。
 - 无线停充但仍在旁路供电时，保留当前会话的 `无线输入 ICL（旁路）`；电池充电上限显示为 `-- / 已停止`。

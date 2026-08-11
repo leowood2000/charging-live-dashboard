@@ -1,6 +1,7 @@
 import unittest
 
-from server import Sampler, clear_vote_topics, merge_vote_topics, resolve_wired_input_source
+from server import (Sampler, WIRED_VOTER_TOPICS, clear_vote_topics,
+                    merge_vote_topics, parse_vote_blocks, resolve_wired_input_source)
 
 
 class WiredInputSourceTests(unittest.TestCase):
@@ -31,6 +32,16 @@ class WiredInputSourceTests(unittest.TestCase):
         self.assertNotIn("wireless_buck_input", cleared)
         self.assertNotIn("div2_single", cleared)
         self.assertIn("chg_enable", cleared)
+
+    def test_shared_buck_fcc_is_not_owned_by_wired_clear_set(self):
+        # buck_charge_curr 同时承载无线热控与有线 Buck FCC，不能由单侧断开清空。
+        self.assertNotIn("buck_charge_curr", WIRED_VOTER_TOPICS)
+
+    def test_vote_header_keeps_absolute_time_for_session_freshness(self):
+        text = "[10:00:01:123] mca_vote:1 buck_charge_curr VOTER:\n1.mca_thermal 1 4000"
+        block = parse_vote_blocks(text, fname="mca_log_20260811_095900")["buck_charge_curr"]
+        self.assertGreater(block["at"], 0)
+        self.assertEqual("10:00:01:123", block["time"])
 
     def test_wireless_path_survives_missing_wireless_voter_topic(self):
         sampler = Sampler.__new__(Sampler)

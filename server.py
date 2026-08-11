@@ -705,6 +705,7 @@ def parse_vote_blocks(text: str, offset_minutes: int = 0, fname: str = "") -> di
                 "result": results_by_topic.get(topic),
                 "rows": [],
             }
+            current["at"] = abs_log_ms(fname, current["time"]) if current["time"] else 0
             blocks[topic] = current
             continue
         if current is not None:
@@ -734,7 +735,7 @@ def merge_vote_topics(previous: dict | None, incoming: dict | None) -> dict:
             merged[topic] = copy.deepcopy(next_block)
             continue
         block = copy.deepcopy(old)
-        for field in ("topic", "time", "unit", "policy"):
+        for field in ("topic", "time", "unit", "policy", "at"):
             value = next_block.get(field)
             if value not in (None, ""):
                 block[field] = value
@@ -884,6 +885,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     d_cur_cp_seq = -1
     d_buck = False
     d_boundary = False
+    d_boundary_at: int | None = None
     d_ctx = False
     d_cur_max: dict | None = None
     d_stage_cur_max: dict | None = None
@@ -905,6 +907,10 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
                 or "real_type changed:" in line):
             last_boundary_kind = "wired"
             d_boundary = True
+            tm = VOTE_TIME_RE.search(line)
+            raw = tm.group(1) if tm else ""
+            d_boundary_at = (abs_log_ms(fname, shift_log_time(raw, offset_minutes))
+                             if raw else None)
             d_cp_mode = None
             d_cp_mode_seq = -1
             d_cp_ratio = None
@@ -1028,7 +1034,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
         d_state = "unknown"
     return {
         "wireless": (w_cp_mode, w_cp_work_mode, w_cp_work_mode_ms, w_decision, w_boundary),
-        "wired": (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
+        "wired": (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary, d_boundary_at,
                   d_cur_max, d_stage_cur_max),
     }
 
@@ -1200,7 +1206,9 @@ WIRELESS_VOTER_TOPICS = {
     "wls_single_chg_cur", "wls_multi_chg_cur", "wls_quick_chg_disable",
 }
 WIRED_VOTER_TOPICS = {
-    "buck_charge_curr", "buck_input", "div1_single", "div1_multi",
+    # buck_charge_curr 是有线/无线共用 FCC votable；不能在任一单侧
+    # 断开时整体清掉，页面会按会话时间确认它是否属于当前路径。
+    "buck_input", "div1_single", "div1_multi",
     "div2_single", "div2_multi", "div4_single", "div4_multi",
     "single_chg_cur", "multi_chg_cur", "quick_chg_disable", "quick_chg_en",
 }
@@ -1448,6 +1456,8 @@ class Sampler:
         # 有线 CP quick_charge cur_max：1611 最终行 / 1597 阶段行
         self.last_wired_cur_max: dict | None = None
         self.last_wired_stage_cur_max: dict | None = None
+        # 最近一次 USB/real_type 会话边界；用于确认共享 Buck FCC 票的归属。
+        self.last_wired_session_ms: int | None = None
         # 有线输入遥测缓存：CP 与 Buck 各留一份，按 wired_cp.state 选择来源
         self.last_wired_cp_tel: dict | None = None
         self.last_wired_buck_tel: dict | None = None
@@ -1713,7 +1723,7 @@ class Sampler:
                 pp_log, self.adb.utc_offset_minutes, self.last_log_fname)
             (w_cp_mode, w_cp_work_mode, w_cp_work_mode_ms,
              w_decision, w_boundary) = state["wireless"]
-            (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
+            (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary, d_boundary_at,
              d_cur_max, d_stage_cur_max) = state["wired"]
             # 有线输入遥测：只解析最后一次会话边界之后的日志段；
             # 同一行（log_time/vbus/ibus）不刷新 at，避免旧值被伪装成刚刚采到；
@@ -1801,6 +1811,7 @@ class Sampler:
             # 有线 track：usb online / real_type changed 边界
             if d_boundary:
                 self.last_wired_state = d_state
+                self.last_wired_session_ms = d_boundary_at
                 self.last_wired_cp_ratio = d_cp_ratio
                 self.last_wired_cur_cp = d_cur_cp
                 self.last_wired_buck = d_buck
@@ -1965,6 +1976,7 @@ class Sampler:
             "ratio": self.last_wired_cp_ratio if wstate == "cp" else None,
             "active": wstate == "cp",
             "cur_work_cp": bool(self.last_wired_cur_cp),
+            "session_at": self.last_wired_session_ms or 0,
             "cur_max": (copy.deepcopy(self.last_wired_cur_max)
                         if self.last_wired_cur_max is not None else None),
             "stage_cur_max": (copy.deepcopy(self.last_wired_stage_cur_max)
@@ -1991,6 +2003,7 @@ class Sampler:
         """发布独立 wireless_path；voter topic 仅保留为详情兼容层。"""
         derived = core.setdefault("derived", {})
         path: dict = {}
+        path["session_at"] = getattr(self, "last_wls_session_ms", None) or 0
         if self.last_wls_icl is not None:
             path.update({
                 "wireless_icl": self.last_wls_icl,
@@ -2181,6 +2194,10 @@ class Sampler:
         if usb_ibus_ma is not None:
             usb_ibus_ma /= 1000.0          # uA -> mA
         cp_ibus_total_ma = num(nodes.get("ibus_total", {}).get("value", ""))
+        # SIC-BAT 独立于 div/buck votable，节点原始值为 µA；0 表示未施加可用上限。
+        wired_sic_raw = num(nodes.get("wired_chg_curr", {}).get("value", ""))
+        wired_sic_limit_ma = (wired_sic_raw / 1000.0
+                              if wired_sic_raw is not None and wired_sic_raw > 0 else None)
         wireless_signal = (
             vout is not None and iout is not None
             and vout > 1000 and iout > 100)
@@ -2324,6 +2341,7 @@ class Sampler:
             "wired_tel_at": tel_at,
             "wired_usb_online": usb_online,
             "cp_ibus_total_ma": cp_ibus_total_ma,
+            "wired_sic_limit_ma": wired_sic_limit_ma,
             "cp_ibus_owner": cp_ibus_owner(input_source, cp_ibus_total_ma),
             "battery_power_w": round(battery_power, 2) if battery_power is not None else None,
             "batt_current_ma": round(batt_cur_ma, 1) if batt_cur_ma is not None else None,
