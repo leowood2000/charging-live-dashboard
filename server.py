@@ -40,91 +40,6 @@ USB_UEVENT = "/sys/class/power_supply/usb/uevent"
 MCA_LOG_DIR = "/data/vendor/bsplog/charge/charge_logger/mca_log"
 THERMAL_DUMP = "/data/vendor/thermal/thermal.dump"
 
-# 实机快充切换测试确认：Buck 阶段 ibus_total=0，电荷泵预启动阶段会短暂
-# 出现 3~5mA，真正承载电流后直接跃升到 400mA 以上。CP 稳态也可能
-# 瞬时读到 0，因此低电流必须与当前会话 operation mode/work_mode 融合。
-CP_IBUS_BUCK_MAX_MA = 20.0
-CP_IBUS_ACTIVE_MIN_MA = 100.0
-
-
-def classify_wireless_cp_ibus(cp_ibus_ma: float) -> str:
-    """Classify the live wireless path from charge-pump branch current."""
-    current = abs(cp_ibus_ma)
-    if current >= CP_IBUS_ACTIVE_MIN_MA:
-        return "cp"
-    if current <= CP_IBUS_BUCK_MAX_MA:
-        return "buck"
-    return "transition"
-
-
-def resolve_wireless_cp_state(cp_ibus_ma: float,
-                              cp_mode: int | None,
-                              cp_work_mode: int | None) -> str:
-    """Fuse live branch current with hard CP evidence from this wireless session."""
-    live = classify_wireless_cp_ibus(cp_ibus_ma)
-    session_cp = (
-        cp_mode is not None and cp_mode > 0
-        or cp_mode is None and cp_work_mode in (1, 2, 4)
-    )
-    return "cp" if live == "buck" and session_cp else live
-
-
-def resolve_input_source(usb_online: bool | None,
-                         usb_vbus_mv: float | None,
-                         wireless_signal: bool) -> str:
-    """Resolve the physical input without using shared CP telemetry."""
-    if usb_online is True:
-        return "wired"
-    if usb_online is False:
-        return "wireless" if wireless_signal else "none"
-    if wireless_signal:
-        return "wireless"
-    return "wired" if usb_vbus_mv is not None and usb_vbus_mv > 1000 else "none"
-
-
-def cp_ibus_owner(input_source: str, cp_ibus_ma: float | None) -> str:
-    """Assign shared ibus_total only after the physical input is known."""
-    if cp_ibus_ma is None:
-        return "none"
-    return input_source if input_source in ("wired", "wireless") else "none"
-
-
-def resolve_wireless_connected(latched: bool | None,
-                               input_source: str,
-                               vout_mv: float | None) -> bool:
-    """Keep pad presence independent from low/zero RX activity current."""
-    if latched is not None:
-        return latched
-    return input_source == "wireless" or (vout_mv is not None and vout_mv > 1000)
-
-
-def resolve_wired_input_source(wired_state: str,
-                               cp_ibus_ma: float | None,
-                               usb_ibus_ma: float | None,
-                               usb_online: bool,
-                               charging_enabled: bool | None,
-                               battery_current_ma: float | None) -> str | None:
-    """Choose wired telemetry; idle CP after stop must not hide USB system load."""
-    cp_valid = cp_ibus_ma is not None
-    stopped = (
-        charging_enabled is False
-        and battery_current_ma is not None
-        and abs(battery_current_ma) <= 300
-    )
-    cp_idle_while_stopped = stopped and cp_valid and abs(cp_ibus_ma) <= 50
-    if wired_state == "cp" and cp_valid and not cp_idle_while_stopped:
-        return "cp_ibus_total"
-    if usb_online and usb_ibus_ma is not None:
-        return "usb_uevent"
-    return "cp_ibus_total" if wired_state == "cp" and cp_valid else None
-
-
-def effective_vote_value(voters: dict, topic: str) -> int | None:
-    block = voters.get(topic) or {}
-    result = block.get("result") or {}
-    value = result.get("value")
-    return int(value) if isinstance(value, (int, float)) else None
-
 
 def _detect_version() -> str:
     """Git short hash（启动时的版本标识），失败时返回 dev。"""
@@ -401,8 +316,7 @@ class AdbReader:
         if not self.available:
             return False, ""
         grep_args = (
-            "-e 'power_good' -e 'usb online' -e 'real_type changed' "
-            "-e 'AUTHEN_FINISH' -e 'uuid_value' "
+            "-e 'power_good' -e 'AUTHEN_FINISH' -e 'uuid_value' "
             "-e 'TX_ADAPTER' -e 'FAST_CHARGE' -e 'fast chg success' "
             "-e 'set chg current' -e 'open path ibus' "
             "-e 'smartchg_soc_limit_callback' "
@@ -474,13 +388,13 @@ class AdbReader:
             return False, ""
 
     def read_thermal_dump(self, tail_bytes: int = 65536) -> str:
-        """Read latest wireless plus latest generic virtual-temperature line."""
+        """Tail the newest thermal.dump lines (mi_thermald live state)."""
         if not self.available:
             return ""
         try:
             code, out, _ = self._run(
                 ["shell", "su", "-c",
-                 f'"tail -c {tail_bytes} {THERMAL_DUMP} | awk \'/VIRTUAL-SENSOR-FORMULA/ {{ any=\\$0 }} /MONITOR-WIRELESS/ {{ wls=\\$0 }} END {{ if (wls != \\\"\\\") print wls; if (any != \\\"\\\" && any != wls) print any }}\'"'],
+                 f'"tail -c {tail_bytes} {THERMAL_DUMP} | grep -a -F \'MONITOR-WIRELESS\' | tail -n 3"'],
                 timeout=15)
             return out if code == 0 else ""
         except FileNotFoundError:
@@ -621,6 +535,61 @@ VOTE_POLICIES = {
     "multi_chg_cur": "MIN",
 }
 
+# 日志窗口滚动时按 topic 增量保留；真正的输入边界到来时再清理对应域。
+WIRELESS_VOTER_TOPICS = {
+    "wireless_buck_input", "wireless_bpp_in", "wireless_bppqc2_in",
+    "wireless_bppqc3_in", "wireless_epp_in", "wireless_auth_20w",
+    "wireless_auth_30w", "wireless_auth_50w", "wireless_auth_80w",
+    "wireless_auth_voice_box", "wireless_auth_magnet_30w",
+    "wireless_sw_qc_ich", "wireless_sw_thermal_ich",
+    "wls_single_chg_cur", "wls_multi_chg_cur", "wls_quick_chg_disable",
+}
+WIRED_VOTER_TOPICS = {
+    "buck_input", "div1_single", "div1_multi", "div2_single", "div2_multi",
+    "div4_single", "div4_multi", "single_chg_cur", "multi_chg_cur",
+    "quick_chg_disable", "quick_chg_en",
+}
+
+
+def resolve_input_source(usb_online: bool | None, usb_vbus_mv: float | None,
+                         wireless_signal: bool) -> str:
+    """Resolve physical input before assigning shared CP telemetry."""
+    if usb_online is True:
+        return "wired"
+    if usb_online is False:
+        return "wireless" if wireless_signal else "none"
+    if wireless_signal:
+        return "wireless"
+    return "wired" if usb_vbus_mv is not None and usb_vbus_mv > 1000.0 else "none"
+
+
+def cp_ibus_owner(input_source: str, cp_ibus_ma: float | None) -> str:
+    if cp_ibus_ma is None or input_source not in ("wired", "wireless"):
+        return "none"
+    return input_source
+
+
+def resolve_wireless_connected(latched: bool | None, input_source: str,
+                               vout_mv: float | None) -> bool:
+    if latched is not None:
+        return bool(latched)
+    return input_source == "wireless" or (vout_mv is not None and vout_mv > 1000.0)
+
+
+def resolve_wired_input_source(wired_state: str, cp_ibus_ma: float | None,
+                               usb_ibus_ma: float | None, usb_online: bool,
+                               charging_enabled: bool | None,
+                               battery_current_ma: float | None) -> str | None:
+    cp_valid = cp_ibus_ma is not None
+    stopped = charging_enabled is False and battery_current_ma is not None \
+        and abs(battery_current_ma) <= 300.0
+    cp_idle = stopped and cp_valid and abs(cp_ibus_ma) <= 50.0
+    if wired_state == "cp" and cp_valid and not cp_idle:
+        return "cp_ibus_total"
+    if usb_online and usb_ibus_ma is not None:
+        return "usb_uevent"
+    return "cp_ibus_total" if wired_state == "cp" and cp_valid else None
+
 
 def shift_log_time(time_str: str, offset_minutes: int) -> str:
     """Shift a HH:MM:SS:mmm kernel log timestamp by the device UTC offset."""
@@ -645,18 +614,12 @@ def abs_log_ms(fname: str, time_str: str) -> int:
     m = LOG_FILE_RE.search(fname or "")
     if m:
         base = datetime(datetime.now().year, int(m.group(1)), int(m.group(2))).date()
-    p = time_str.split(":")
     base_ms = int(datetime.combine(base, datetime.min.time()).timestamp() * 1000)
+    p = time_str.split(":")
     if len(p) < 4:
         return base_ms
     try:
         secs = int(p[0]) * 3600 + int(p[1]) * 60 + int(p[2])
-        # 单个 MCA 文件可能跨过本地 00:00。文件名 HHMM 是文件开始时刻；
-        # 行时刻若比开始时刻早超过 12 小时，应属于次日而不是同日清晨。
-        if m:
-            file_start_secs = int(m.group(3)) * 3600 + int(m.group(4)) * 60
-            if secs + 12 * 3600 < file_start_secs:
-                base_ms += 24 * 3600 * 1000
         return base_ms + secs * 1000 + int(p[3])
     except ValueError:
         return base_ms
@@ -700,13 +663,13 @@ def parse_vote_blocks(text: str, offset_minutes: int = 0, fname: str = "") -> di
             current = {
                 "topic": topic,
                 "time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "at": abs_log_ms(fname, shift_log_time(tm.group(1), offset_minutes)) if tm else int(time.time() * 1000),
                 "unit": VOTE_UNITS.get(topic, ""),
                 "policy": VOTE_POLICIES.get(topic, "UNKNOWN"),
                 "changed": changes_by_topic.get(topic),
                 "result": results_by_topic.get(topic),
                 "rows": [],
             }
-            current["at"] = abs_log_ms(fname, current["time"]) if current["time"] else 0
             blocks[topic] = current
             continue
         if current is not None:
@@ -716,47 +679,31 @@ def parse_vote_blocks(text: str, offset_minutes: int = 0, fname: str = "") -> di
                     "idx": int(m.group(1)), "client": m.group(2),
                     "enable": int(m.group(3)), "value": int(m.group(4)),
                 })
-    # changed/result 行可能位于 VOTER 表头之后，解析结束后回填当前 topic。
-    for topic, block in blocks.items():
-        if topic in changes_by_topic:
-            block["changed"] = changes_by_topic[topic]
-        if topic in results_by_topic:
-            block["result"] = results_by_topic[topic]
     return blocks
 
 
 def merge_vote_topics(previous: dict | None, incoming: dict | None) -> dict:
-    """按 topic 增量合并投票表；日志滑窗缺 topic 不视为撤票。"""
+    """Merge the topics present in this log window without deleting omitted topics."""
     merged = copy.deepcopy(previous or {})
-    for topic, next_block in (incoming or {}).items():
-        if not isinstance(next_block, dict):
-            continue
+    for topic, nxt in (incoming or {}).items():
         old = merged.get(topic)
         if not isinstance(old, dict):
-            merged[topic] = copy.deepcopy(next_block)
+            merged[topic] = copy.deepcopy(nxt)
             continue
         block = copy.deepcopy(old)
-        for field in ("topic", "time", "unit", "policy", "at"):
-            value = next_block.get(field)
-            if value not in (None, ""):
-                block[field] = value
+        for field in ("topic", "time", "unit", "policy", "rows", "at"):
+            if field in nxt:
+                block[field] = copy.deepcopy(nxt[field])
         for field in ("changed", "result"):
-            value = next_block.get(field)
-            if value is not None:
-                block[field] = copy.deepcopy(value)
-        rows = next_block.get("rows")
-        if isinstance(rows, list) and rows:
-            block["rows"] = copy.deepcopy(rows)
+            if field in nxt and nxt[field] is not None:
+                block[field] = copy.deepcopy(nxt[field])
         merged[topic] = block
     return merged
 
 
-def clear_vote_topics(voters: dict | None, topics: set[str]) -> dict:
-    """在明确会话边界删除对应域，避免旧会话票无限期残留。"""
-    cleared = copy.deepcopy(voters or {})
-    for topic in topics:
-        cleared.pop(topic, None)
-    return cleared
+def clear_vote_topics(previous: dict | None, topics: set[str]) -> dict:
+    """Clear only the topics owned by a disconnected input domain."""
+    return {k: copy.deepcopy(v) for k, v in (previous or {}).items() if k not in topics}
 
 
 def _log_seconds(time_str: str) -> int:
@@ -826,8 +773,7 @@ def parse_cp_work_mode(text: str) -> int | None:
     return last
 
 
-def parse_quick_cur_decision(
-        text: str, offset_minutes: int = 0, fname: str = "") -> dict | None:
+def parse_quick_cur_decision(text: str, offset_minutes: int = 0) -> dict | None:
     """Latest select_max_ibat decision: inputs (445) + cur_max:[Final] (446)."""
     last_inputs: dict | None = None
     result: dict | None = None
@@ -838,15 +784,14 @@ def parse_quick_cur_decision(
             line)
         if m:
             tm = VOTE_TIME_RE.search(line)
-            log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
             last_inputs = {
                 "channel_cur": int(m.group(1)),
                 "temp_max_cur": int(m.group(2)),
                 "tx_adapter_max": int(m.group(3)),
                 "sw_qc_ichg": int(m.group(4)),
                 "sw_thermal_ichg": int(m.group(5)),
-                "log_time": log_time,
-                "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
+                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "at": int(time.time() * 1000),
             }
             continue
         m2 = re.search(r"select_max_ibat:446 cur_max:\[Final\]: (\d+)", line)
@@ -867,8 +812,7 @@ WIRED_FINAL_CUR_MAX_RE = re.compile(
 def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     """无线/有线 CP 状态彻底解耦：
     - power_good 只重置无线 track；usb online / real_type changed 只重置有线 track
-    - 无线 operation mode 仍要求无线 quickchg 上下文；
-      有线日志中的 sc8581_set_operation_mode 不带 quickchg 上下文前缀，按最近有线边界识别
+    - SC8581 operation mode 只有在对应 quickchg 上下文出现后才写入对应 track
     """
     # 无线 track（power_good 边界）
     w_cp_mode: int | None = None
@@ -886,16 +830,13 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     d_cur_cp_seq = -1
     d_buck = False
     d_boundary = False
-    d_boundary_at: int | None = None
     d_ctx = False
     d_cur_max: dict | None = None
     d_stage_cur_max: dict | None = None
-    last_boundary_kind: str | None = None
     seq = 0
     for line in text.splitlines():
         seq += 1
         if "power_good_on" in line or "power_good_off" in line:
-            last_boundary_kind = "wireless"
             w_boundary = True
             w_cp_mode = None
             w_cp_work_mode = None
@@ -906,12 +847,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
             continue
         if ("usb online: 0" in line or "usb online: 1" in line
                 or "real_type changed:" in line):
-            last_boundary_kind = "wired"
             d_boundary = True
-            tm = VOTE_TIME_RE.search(line)
-            raw = tm.group(1) if tm else ""
-            d_boundary_at = (abs_log_ms(fname, shift_log_time(raw, offset_minutes))
-                             if raw else None)
             d_cp_mode = None
             d_cp_mode_seq = -1
             d_cp_ratio = None
@@ -935,19 +871,11 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
         m = re.search(r"set operation mode (\d+)", line)
         if m:
             n = int(m.group(1))
-            if w_ctx and last_boundary_kind == "wireless":
+            if w_ctx:
                 w_cp_mode = n
-            elif d_ctx and last_boundary_kind == "wired":
+            if d_ctx:
                 d_cp_mode = n
                 d_cp_mode_seq = seq
-            elif "sc8581_set_operation_mode" in line and last_boundary_kind == "wired":
-                # 有线日志的 cp_sc8581 行没有 mca_quick_charge_/strategy_quickchg_ 前缀，
-                # 仅依赖 d_ctx 会把明确的 mode=1 丢掉，随后被 buckchg 行误判为 Buck。
-                d_cp_mode = n
-                d_cp_mode_seq = seq
-                op_ratio = re.search(r"work_mode\s+(\d+)", line)
-                if op_ratio:
-                    d_cp_ratio = int(op_ratio.group(1))
             continue
         m = re.search(r"mca_wireless_quick_charge_select_cur_work_mode:.*work_mode=(\d+)", line)
         if m:
@@ -968,26 +896,24 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
         mf = WIRED_FINAL_CUR_MAX_RE.search(line)
         if mf and d_ctx:
             tm = VOTE_TIME_RE.search(line)
-            log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
             d_cur_max = {
                 "cur_max": int(mf.group(1)),
                 "secure_cur": int(mf.group(2)),
                 "channel_cur": int(mf.group(3)),
                 "thermal_cur": int(mf.group(4)),
-                "log_time": log_time,
-                "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
+                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "at": int(time.time() * 1000),
             }
             continue
         ms = WIRED_STAGE_CUR_MAX_RE.search(line)
         if ms and d_ctx:
             tm = VOTE_TIME_RE.search(line)
-            log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
             d_stage_cur_max = {
                 "stage": int(ms.group(1)),
                 "cur_max": int(ms.group(2)),
                 "delta": int(ms.group(3)),
-                "log_time": log_time,
-                "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
+                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "at": int(time.time() * 1000),
             }
             d_cur_cp = True
             d_cur_cp_seq = seq
@@ -1004,15 +930,14 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
             line)
         if m:
             tm = VOTE_TIME_RE.search(line)
-            log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
             w_inputs = {
                 "channel_cur": int(m.group(1)),
                 "temp_max_cur": int(m.group(2)),
                 "tx_adapter_max": int(m.group(3)),
                 "sw_qc_ichg": int(m.group(4)),
                 "sw_thermal_ichg": int(m.group(5)),
-                "log_time": log_time,
-                "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
+                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "at": int(time.time() * 1000),
             }
             continue
         m2 = re.search(r"select_max_ibat:446 cur_max:\[Final\]: (\d+)", line)
@@ -1035,7 +960,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
         d_state = "unknown"
     return {
         "wireless": (w_cp_mode, w_cp_work_mode, w_cp_work_mode_ms, w_decision, w_boundary),
-        "wired": (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary, d_boundary_at,
+        "wired": (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
                   d_cur_max, d_stage_cur_max),
     }
 
@@ -1071,13 +996,11 @@ def _latest_line_match(text: str, pattern: re.Pattern):
     return m, tm
 
 
-def parse_wired_buck_telemetry(
-        text: str, offset_minutes: int = 0, fname: str = "") -> dict | None:
+def parse_wired_buck_telemetry(text: str, offset_minutes: int = 0) -> dict | None:
     """最新一条 buckchg 状态行：vbus/ibus 为 µV/µA，返回 mV/mA。"""
     m, tm = _latest_line_match(text, WIRED_BUCK_TELEMETRY_RE)
     if m is None:
         return None
-    log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
     return {
         "vbus_mv": int(m.group(7)) / 1000.0,
         "ibus_ma": int(m.group(8)) / 1000.0,
@@ -1085,13 +1008,12 @@ def parse_wired_buck_telemetry(
         "chg_en_client": m.group(4),
         "chg_type": int(m.group(5)),
         "source": "buckchg_telemetry",
-        "log_time": log_time,
-        "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
+        "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+        "at": int(time.time() * 1000),
     }
 
 
-def parse_wired_cp_telemetry(
-        text: str, offset_minutes: int = 0, fname: str = "") -> dict | None:
+def parse_wired_cp_telemetry(text: str, offset_minutes: int = 0) -> dict | None:
     """最新一条有线 quick charge regulation 行。
 
     adp_volt 第一值为请求值、第二值为实测值（mV）；ibus 单位为 mA。
@@ -1099,7 +1021,6 @@ def parse_wired_cp_telemetry(
     m, tm = _latest_line_match(text, WIRED_CP_TELEMETRY_RE)
     if m is None:
         return None
-    log_time = shift_log_time(tm.group(1), offset_minutes) if tm else ""
     return {
         "vbus_mv": int(m.group(3)),
         "ibus_ma": int(m.group(10)),
@@ -1107,8 +1028,8 @@ def parse_wired_cp_telemetry(
         "chg_en_client": "quick_charge",
         "chg_type": None,
         "source": "quick_charge_regulation",
-        "log_time": log_time,
-        "at": abs_log_ms(fname, log_time) if log_time else int(time.time() * 1000),
+        "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+        "at": int(time.time() * 1000),
     }
 
 
@@ -1198,23 +1119,6 @@ def parse_wireless_mode(text: str, offset_minutes: int = 0) -> dict:
             "qc_enabled": qc_enabled}
 
 
-WIRELESS_VOTER_TOPICS = {
-    "wireless_buck_input", "wireless_bpp_in", "wireless_bppqc2_in",
-    "wireless_bppqc3_in", "wireless_epp_in", "wireless_auth_20w",
-    "wireless_auth_30w", "wireless_auth_50w", "wireless_auth_80w",
-    "wireless_auth_voice_box", "wireless_auth_magnet_30w",
-    "wireless_sw_qc_ich", "wireless_sw_thermal_ich",
-    "wls_single_chg_cur", "wls_multi_chg_cur", "wls_quick_chg_disable",
-}
-WIRED_VOTER_TOPICS = {
-    # buck_charge_curr 是有线/无线共用 FCC votable；不能在任一单侧
-    # 断开时整体清掉，页面会按会话时间确认它是否属于当前路径。
-    "buck_input", "div1_single", "div1_multi",
-    "div2_single", "div2_multi", "div4_single", "div4_multi",
-    "single_chg_cur", "multi_chg_cur", "quick_chg_disable", "quick_chg_en",
-}
-
-
 def is_last_wireless_power_off(text: str) -> bool:
     """True if the last wireless power event is removal (power_good_off)."""
     return (
@@ -1225,20 +1129,7 @@ def is_last_wireless_power_off(text: str) -> bool:
 
 THERMAL_WIRELESS_RE = re.compile(
     r"\[([A-Z0-9\-]*MONITOR-WIRELESS)\]\[VIRTUAL-SENSOR-FORMULA (\d+)\]")
-THERMAL_ANY_RE = re.compile(
-    r"\[([A-Z0-9\-]+)\]\[VIRTUAL-SENSOR-FORMULA (\d+)\]")
 THERMAL_TARGET_RE = re.compile(r"\[wireless_charge (\d+)\]")
-
-
-def thermal_scene_for_segment(segment: str) -> str:
-    suffix = "-MONITOR-WIRELESS"
-    for key, scene in THERMAL_SCENES.items():
-        if not key.endswith(suffix):
-            continue
-        prefix = key[:-len(suffix)]
-        if prefix and (segment == prefix or segment.startswith(prefix + "-")):
-            return scene
-    return THERMAL_SCENES["MONITOR-WIRELESS"]
 
 
 def parse_thermal_dump(text: str) -> dict:
@@ -1246,18 +1137,14 @@ def parse_thermal_dump(text: str) -> dict:
     result: dict = {"scene": None, "virtual_temp": None, "target": None}
     for line in text.splitlines():
         m = THERMAL_WIRELESS_RE.search(line)
-        if m:
-            seg = m.group(1)
-            result["scene"] = THERMAL_SCENES.get(seg, seg)
-            result["virtual_temp"] = int(m.group(2)) / 1000.0
-            t = THERMAL_TARGET_RE.search(line)
-            result["target"] = int(t.group(1)) if t else None
+        if not m:
             continue
-        any_line = THERMAL_ANY_RE.search(line)
-        if any_line:
-            result["scene"] = thermal_scene_for_segment(any_line.group(1))
-            result["virtual_temp"] = int(any_line.group(2)) / 1000.0
-            result["target"] = None
+        seg = m.group(1)
+        result["scene"] = THERMAL_SCENES.get(seg, seg)
+        result["virtual_temp"] = int(m.group(2)) / 1000.0
+        t = THERMAL_TARGET_RE.search(line)
+        if t:
+            result["target"] = int(t.group(1))
     return result
 
 
@@ -1267,7 +1154,7 @@ def classify_session_line(line: str):
         return ("off", "充电板移除", "")
     if "wireless power_good_on" in line:
         return ("on", "充电板接入", "")
-    if "usb online: 0" in line or re.search(r"real_type changed: \d+ => 0", line):
+    if "usb online: 0" in line:
         return ("wired_off", "有线充电移除", "")
     if "usb online: 1" in line:
         return ("wired_on", "有线充电接入", "")
@@ -1289,7 +1176,7 @@ def classify_session_line(line: str):
         return ("ichg", "设置充电电流", m.group(1))
     m = re.search(r"open path ibus (\d+)", line)
     if m:
-        return ("open", "CP 建链", m.group(1))
+        return ("open", "打开快充路径", m.group(1))
     if "smartchg_soc_limit_callback" in line and "effective_result: 1" in line:
         return ("smart", "SmartEndura 介入", "")
     return None
@@ -1298,17 +1185,14 @@ def classify_session_line(line: str):
 def parse_sessions(text: str, offset_minutes: int = 0) -> list:
     """Group mca_log handshake/limit events into charging sessions.
 
-    无线以 power_good_on/off 建立边界；有线以 usb online 1/0 建立边界。
-    只保留最新 1 个会话，并将连续的充电电流设置合并，避免日志刷新把页面撑长。
+    与安卓版一致：
+    - 以 power_good_on 建立会话，不再靠 300 秒间隔猜测
+    - power_good_off 也进入“充电板移除”事件并标记会话结束
+    - 所有电流变化 / open path 事件都保留
+    - 只保留最新 1 个会话，每个会话最多 100 条事件
     """
     sessions: list[dict] = []
     cur: dict | None = None
-    open_group: dict | None = None
-    ichg_group: dict | None = None
-    open_first_ibus = 0
-    open_count = 0
-    ichg_first_ma = 0
-    ichg_count = 0
     for line in text.splitlines():
         tm = VOTE_TIME_RE.search(line)
         ev = classify_session_line(line)
@@ -1317,43 +1201,28 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
         t = shift_log_time(tm.group(1), offset_minutes)
         kind, label, detail = ev
         if kind in ("on", "wired_on"):
-            source = "wired" if kind == "wired_on" else "wireless"
-            # 同一来源的重复 online/power_good 只刷新边界，不生成空会话。
-            if cur is not None and not cur["ended"] and cur.get("source") == source:
-                continue
-            # 新输入源到来时封口上一个未结束会话。
+            # 新的 power_good_on 到来时，把上一个未结束会话标为结束
             if cur is not None and not cur["ended"]:
                 cur["ended"] = True
             cur = {
-                "start": t, "ended": False, "source": source, "events": [],
+                "start": t, "ended": False, "events": [],
+                "source": "wired" if kind == "wired_on" else "wireless",
                 "uuid": None, "tx_adapter": None, "fc_flag": None,
                 "opens": 0, "smartendura": False,
                 "peak_limit_ma": None, "final_limit_ma": None,
             }
             sessions.append(cur)
-            open_group = None
-            open_count = 0
-            ichg_group = None
-            ichg_count = 0
-            cur["events"].append({"kind": kind, "time": t, "label": label, "detail": detail})
+            if kind == "on":
+                cur["events"].append({"kind": kind, "time": t, "label": label, "detail": detail})
             continue
         if cur is None:
             continue
         evs = cur["events"]
-        if kind != "open":
-            open_group = None
-            open_count = 0
-        if kind != "ichg":
-            ichg_group = None
-            ichg_count = 0
         if kind in ("off", "wired_off"):
-            matches = ((kind == "off" and cur.get("source") == "wireless")
-                       or (kind == "wired_off" and cur.get("source") == "wired"))
-            if not matches:
-                continue
             cur["ended"] = True
-            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
-            # 断开后不再向已结束会话追加日志；后续输入边界会建立新会话。
+            if kind == "off":
+                evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+            # 断开后不再向已结束会话追加日志
             cur = None
             continue
         elif kind == "auth":
@@ -1373,33 +1242,30 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
             evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
         elif kind == "ichg":
             v = int(detail)
-            if ichg_group is None:
-                ichg_first_ma = v
-                ichg_count = 1
-                ichg_group = {"kind": kind, "time": t, "label": label,
-                              "detail": f"{v}mA"}
-                evs.append(ichg_group)
+            if len(sessions) == 1 and evs and evs[-1].get("kind") == "ichg":
+                prev = evs[-1]
+                if "→" in str(prev.get("detail", "")):
+                    mprev = re.search(r"^(\d+)", str(prev.get("detail", "")))
+                    first = int(mprev.group(1)) if mprev else v
+                    count_match = re.search(r"· (\d+)次", str(prev.get("detail", "")))
+                    count = int(count_match.group(1)) + 1 if count_match else 2
+                    prev["time"] = t
+                    prev["detail"] = f"{first}→{v}mA · {count}次"
+                else:
+                    try:
+                        first = int(str(prev.get("detail", "")).split()[0])
+                    except (TypeError, ValueError):
+                        first = v
+                    evs.append({"kind": kind, "time": t, "label": label,
+                                "detail": f"{first}→{v}mA · 2次"})
             else:
-                ichg_count += 1
-                ichg_group["detail"] = f"{ichg_first_ma}→{v}mA · {ichg_count}次"
+                evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
             if cur["peak_limit_ma"] is None or v > cur["peak_limit_ma"]:
                 cur["peak_limit_ma"] = v
             cur["final_limit_ma"] = v
         elif kind == "open":
             cur["opens"] += 1
-            ibus = int(detail)
-            if open_group is None:
-                open_first_ibus = ibus
-                open_count = 1
-                open_group = {
-                    "kind": kind, "time": t, "label": label,
-                    "detail": f"ibus {ibus}mA",
-                }
-                evs.append(open_group)
-            else:
-                open_count += 1
-                open_group["detail"] = (
-                    f"ibus {open_first_ibus}→{ibus}mA · {open_count}次")
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
         elif kind == "smart":
             cur["smartendura"] = True
             evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
@@ -1407,16 +1273,13 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
     while len(sessions) > 1:
         sessions.pop(0)
     for s in sessions:
-        while len(s["events"]) > 40:
+        while len(s["events"]) > 100:
             s["events"].pop(0)
     return sessions
 
 
 class Sampler:
-    """自适应双通道采集。
-
-    快速通道按充电/空闲/无页面访问切换间隔；日志通道连接时按配置周期、
-    完全断开时至少 60s。
+    """双周期采集：快采集 3s；日志连接时按配置周期、完全断开时 60s。
 
     日志（voters/sessions/EPP/实际 ICL）读取失败时保留上次成功数据，
     只把 logs_stale 置 True，页面据此提示“显示上次成功数据”。
@@ -1446,13 +1309,8 @@ class Sampler:
         self.snapshot: dict = self._build_error_snapshot("initializing")
         # 日志缓存：读取失败保留上次成功数据
         self.last_voters: dict = {}
-        # 最近一次 chg_enable effective vote；用于停充后校正有线输入测量源
-        self.last_chg_enabled: int | None = None
         self.last_sessions: list = []
         self.last_epp: str | None = None
-        self.last_thermal: dict = {
-            "scene": None, "virtual_temp": None, "target": None,
-        }
         self.last_wls_icl: int | None = None
         self.last_wls_icl_at: int | None = None
         self.last_wls_icl_log_time: str | None = None
@@ -1464,10 +1322,9 @@ class Sampler:
         self.last_buck_fcc: int | None = None
         # sc8581 电荷泵工作模式：>0 表示 CP 路径生效（此时 buck 输入限流不约束实际电流）
         self.last_cp_mode: int | None = None
+        self.last_wls_cp_evidence: bool = False
         # quick wireless 电荷泵分压比 work_mode（1/2/4）
         self.last_cp_work_mode: int | None = None
-        # 低电流时允许保留 CP 的唯一依据：必须来自当前 power_good 会话
-        self.last_wls_cp_evidence = False
         # 最近一次无线 work_mode 变化行的归一化日志毫秒（跨文件单调）
         self.last_wls_work_mode_ms: int | None = None
         # 当前读取的 mca 日志文件名，用于日志时间归一化
@@ -1482,8 +1339,6 @@ class Sampler:
         # 有线 CP quick_charge cur_max：1611 最终行 / 1597 阶段行
         self.last_wired_cur_max: dict | None = None
         self.last_wired_stage_cur_max: dict | None = None
-        # 最近一次 USB/real_type 会话边界；用于确认共享 Buck FCC 票的归属。
-        self.last_wired_session_ms: int | None = None
         # 有线输入遥测缓存：CP 与 Buck 各留一份，按 wired_cp.state 选择来源
         self.last_wired_cp_tel: dict | None = None
         self.last_wired_buck_tel: dict | None = None
@@ -1501,7 +1356,6 @@ class Sampler:
         self.last_smartendura_soc_limit: bool = False
         # 最后一条 power_good_on 的归一化毫秒，用于识别“新无线会话”
         self.last_wls_session_ms: int | None = None
-        # 无线充电板物理连接状态：由 power_good_on/off 锁存，不随 iout 阈值抖动
         self.last_wireless_connected: bool | None = None
         # 日志行 stable key：同一行重复扫描不刷新 at（log_time + 关键值）
         self.last_cur_decision_key: tuple | None = None
@@ -1600,12 +1454,7 @@ class Sampler:
         self._update_logs_active(parsed)
         parsed["mode"] = "live"
         parsed["connected"] = True
-        thermal = parse_thermal_dump(self.adb.read_thermal_dump())
-        if thermal.get("virtual_temp") is not None:
-            self.last_thermal = copy.deepcopy(thermal)
-        elif self.last_thermal.get("virtual_temp") is not None:
-            thermal = copy.deepcopy(self.last_thermal)
-        parsed["thermal"] = thermal
+        parsed["thermal"] = parse_thermal_dump(self.adb.read_thermal_dump())
 
         with self.lock:
             sample = {
@@ -1644,9 +1493,6 @@ class Sampler:
                 vote_log, self.adb.utc_offset_minutes, self.last_log_fname)
             if parsed_voters:
                 self.last_voters = merge_vote_topics(self.last_voters, parsed_voters)
-                chg = effective_vote_value(self.last_voters, "chg_enable")
-                if chg is not None:
-                    self.last_chg_enabled = chg
 
         # 会话/EPP/ICL：低频瘦通道
         if session_read_ok and session_log.strip():
@@ -1663,13 +1509,12 @@ class Sampler:
                 or "soc_limit_workfunc" in line
                 for line in session_log.splitlines())
             if is_last_wireless_power_off(session_log):
-                self.last_wireless_connected = False
                 # 无线已断开：清掉全部无线会话状态，避免上一会话的值继续显示
+                self.last_wireless_connected = False
+                self.last_voters = clear_vote_topics(self.last_voters, WIRELESS_VOTER_TOPICS)
                 self._clear_wireless_session_state()
                 self.last_wls_session_ms = None
             else:
-                if "wireless power_good_on" in session_log:
-                    self.last_wireless_connected = True
                 # 所有无线执行层数据统一按最近一次 power_good_on 截断，
                 # 避免上一会话的 ICL/buck_fcc 混进新会话
                 wtail = split_after_last_wireless_attach(session_log)
@@ -1679,17 +1524,17 @@ class Sampler:
                 pg_ms = last_wireless_attach_ms(
                     session_log, self.adb.utc_offset_minutes, self.last_log_fname)
                 if pg_ms is not None and pg_ms != self.last_wls_session_ms:
+                    self.last_wireless_connected = True
                     self.last_wls_session_ms = pg_ms
+                    self.last_voters = clear_vote_topics(self.last_voters, WIRELESS_VOTER_TOPICS)
                     self._clear_wireless_session_state()
                 wm = parse_wireless_mode(wtail, self.adb.utc_offset_minutes)
                 self.last_wls_mode = wm["mode"]
                 if wm["rx_iout_limit"] is not None:
                     self.last_rx_iout_limit = wm["rx_iout_limit"]
                     self.rx_iout_limit_captured = True
+                    self.last_rx_iout_limit_at = int(time.time() * 1000)
                     self.last_rx_iout_limit_log_time = wm["rx_iout_limit_time"] or ""
-                    self.last_rx_iout_limit_at = (
-                        abs_log_ms(self.last_log_fname, self.last_rx_iout_limit_log_time)
-                        if self.last_rx_iout_limit_log_time else int(time.time() * 1000))
                 icl = parse_wls_icl(
                     wtail, self.adb.utc_offset_minutes, self.last_log_fname)
                 if icl is not None:
@@ -1702,7 +1547,7 @@ class Sampler:
                         self.last_wls_chg_en = chg_en
                         self.last_wls_icl_log_time = log_time
                         self.last_wls_icl_ms = icl_ms
-                        self.last_wls_icl_at = icl_ms if icl_ms > 0 else int(time.time() * 1000)
+                        self.last_wls_icl_at = int(time.time() * 1000)
                 buck_fcc = parse_buck_fcc(wtail)
                 if buck_fcc is not None:
                     self.last_buck_fcc = buck_fcc
@@ -1719,10 +1564,11 @@ class Sampler:
                      or pg_ms_pp > self.last_wls_session_ms))
             if pp_off:
                 self.last_wireless_connected = False
+                self.last_voters = clear_vote_topics(self.last_voters, WIRELESS_VOTER_TOPICS)
                 # pp 通道明确断开（session 通道失败时的兜底）：清无线 CP/quick 状态
                 self.last_cp_mode = None
-                self.last_cp_work_mode = None
                 self.last_wls_cp_evidence = False
+                self.last_cp_work_mode = None
                 self.last_wls_work_mode_ms = None
                 self.last_cur_decision = None
                 self.last_cur_decision_key = None
@@ -1749,7 +1595,7 @@ class Sampler:
                 pp_log, self.adb.utc_offset_minutes, self.last_log_fname)
             (w_cp_mode, w_cp_work_mode, w_cp_work_mode_ms,
              w_decision, w_boundary) = state["wireless"]
-            (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary, d_boundary_at,
+            (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
              d_cur_max, d_stage_cur_max) = state["wired"]
             # 有线输入遥测：只解析最后一次会话边界之后的日志段；
             # 同一行（log_time/vbus/ibus）不刷新 at，避免旧值被伪装成刚刚采到；
@@ -1762,9 +1608,9 @@ class Sampler:
             else:
                 tail = split_after_last_wired_boundary(pp_log)
                 cp_tel = parse_wired_cp_telemetry(
-                    tail, self.adb.utc_offset_minutes, self.last_log_fname)
+                    tail, self.adb.utc_offset_minutes)
                 buck_tel = parse_wired_buck_telemetry(
-                    tail, self.adb.utc_offset_minutes, self.last_log_fname)
+                    tail, self.adb.utc_offset_minutes)
                 if cp_tel is None and buck_tel is None:
                     self.last_wired_cp_tel = None
                     self.last_wired_buck_tel = None
@@ -1793,17 +1639,14 @@ class Sampler:
             elif pp_new_session:
                 if w_cp_mode is not None:
                     self.last_cp_mode = w_cp_mode
+                    self.last_wls_cp_evidence = w_cp_mode > 0
                     if w_cp_mode == 0:
                         # 明确切到 Buck：清掉旧 work_mode，避免页面永远保持 CP
                         self.last_cp_work_mode = None
                         self.last_wls_work_mode_ms = None
-                        self.last_wls_cp_evidence = False
-                    elif w_cp_mode > 0:
-                        self.last_wls_cp_evidence = True
                 if w_cp_work_mode is not None:
                     self.last_cp_work_mode = w_cp_work_mode
-                    if w_cp_work_mode in (1, 2, 4):
-                        self.last_wls_cp_evidence = True
+                    self.last_wls_cp_evidence = w_cp_work_mode in (1, 2, 4)
                     if w_cp_work_mode_ms is not None:
                         self.last_wls_work_mode_ms = w_cp_work_mode_ms
                 if w_decision is not None:
@@ -1815,17 +1658,14 @@ class Sampler:
             else:
                 if w_cp_mode is not None:
                     self.last_cp_mode = w_cp_mode
+                    self.last_wls_cp_evidence = w_cp_mode > 0
                     if w_cp_mode == 0:
                         # 明确切到 Buck：清掉旧 work_mode，避免页面永远保持 CP
                         self.last_cp_work_mode = None
                         self.last_wls_work_mode_ms = None
-                        self.last_wls_cp_evidence = False
-                    elif w_cp_mode > 0:
-                        self.last_wls_cp_evidence = True
                 if w_cp_work_mode is not None:
                     self.last_cp_work_mode = w_cp_work_mode
-                    if w_cp_work_mode in (1, 2, 4):
-                        self.last_wls_cp_evidence = True
+                    self.last_wls_cp_evidence = w_cp_work_mode in (1, 2, 4)
                     if w_cp_work_mode_ms is not None:
                         self.last_wls_work_mode_ms = w_cp_work_mode_ms
                 if w_decision is not None:
@@ -1837,7 +1677,6 @@ class Sampler:
             # 有线 track：usb online / real_type changed 边界
             if d_boundary:
                 self.last_wired_state = d_state
-                self.last_wired_session_ms = d_boundary_at
                 self.last_wired_cp_ratio = d_cp_ratio
                 self.last_wired_cur_cp = d_cur_cp
                 self.last_wired_buck = d_buck
@@ -1889,7 +1728,6 @@ class Sampler:
         last_wls_session_ms 由调用方维护；这里只清 wireless-session scoped 数据，
         避免上一会话的 Final/CP/ICL/rx_iout_limit 冒充当前会话。
         """
-        self.last_voters = clear_vote_topics(self.last_voters, WIRELESS_VOTER_TOPICS)
         self.last_wls_icl = None
         self.last_wls_icl_at = None
         self.last_wls_icl_log_time = None
@@ -1900,8 +1738,8 @@ class Sampler:
         self.last_quick_cur_max = None
         self.last_buck_fcc = None
         self.last_cp_mode = None
-        self.last_cp_work_mode = None
         self.last_wls_cp_evidence = False
+        self.last_cp_work_mode = None
         self.last_wls_work_mode_ms = None
         self.last_cur_decision = None
         self.last_cur_decision_key = None
@@ -1911,9 +1749,74 @@ class Sampler:
         self.last_rx_iout_limit_at = None
         self.last_rx_iout_limit_log_time = None
 
+    def _decorate_wireless_path(self, core: dict) -> None:
+        """Publish wireless path independently from the rolling voter snapshot."""
+        derived = core.setdefault("derived", {})
+        cp_ibus = derived.get("cp_ibus_total_ma")
+        batt_current = derived.get("batt_current_ma")
+        input_current = derived.get("input_current_ma")
+        status = str(core.get("battery", {}).get("status", {}).get("value", "")).lower()
+        live_wireless = (
+            derived.get("input_source") == "wireless"
+            and status == "charging"
+            and isinstance(input_current, (int, float)) and input_current > 0
+            and isinstance(batt_current, (int, float)) and batt_current > 0
+            and isinstance(cp_ibus, (int, float))
+        )
+        wm = getattr(self, "last_cp_work_mode", None)
+        cp_mode = getattr(self, "last_cp_mode", None)
+        session_cp = ((cp_mode is not None and cp_mode > 0)
+                      or (cp_mode is None and wm in (1, 2, 4))
+                      or bool(getattr(self, "last_wls_cp_evidence", False)))
+        if live_wireless:
+            current = abs(cp_ibus)
+            live_state = "cp" if current >= 100.0 else "buck" if current <= 20.0 else "transition"
+            path_state = "cp" if live_state == "buck" and session_cp else live_state
+            path_source = "sysfs_cp_ibus_total+session_cp_mode" if path_state != live_state else "sysfs_cp_ibus_total"
+        elif wm in (1, 2, 4):
+            path_state, path_source = "cp", "quick_wireless_work_mode"
+        elif cp_mode is not None:
+            path_state = "cp" if cp_mode > 0 else "buck"
+            path_source = "sc8581_operation_mode"
+        else:
+            path_state, path_source = "unknown", "none"
+        path = {
+            "session_at": getattr(self, "last_wls_session_ms", None) or 0,
+            "state": path_state,
+            "cp_active": path_state == "cp",
+            "cp_state_source": path_source,
+            "cp_session_evidence": bool(session_cp),
+            "ratio": wm if path_state == "cp" and wm in (1, 2, 4) else None,
+            "wls_mode": getattr(self, "last_wls_mode", "unknown") or "unknown",
+            "rx_iout_limit": getattr(self, "last_rx_iout_limit", None),
+            "rx_iout_limit_captured": bool(getattr(self, "rx_iout_limit_captured", False)),
+            "rx_iout_limit_at": getattr(self, "last_rx_iout_limit_at", None) or 0,
+            "rx_iout_limit_time": getattr(self, "last_rx_iout_limit_log_time", None) or "",
+            "rx_iout_limit_stale": bool(getattr(self, "session_logs_stale", False)),
+            "smartendura_soc_limit": bool(getattr(self, "last_smartendura_soc_limit", False)),
+        }
+        if isinstance(cp_ibus, (int, float)) and live_wireless:
+            path["cp_ibus_total_ma"] = cp_ibus
+        if getattr(self, "last_wls_work_mode_ms", None) is not None:
+            path["wls_work_mode_ms"] = self.last_wls_work_mode_ms
+        quick_cur = getattr(self, "last_quick_cur_max", None)
+        buck_fcc = getattr(self, "last_buck_fcc", None)
+        if quick_cur is not None or buck_fcc is not None:
+            path["battery_limit_ma"] = (
+                quick_cur if quick_cur is not None else buck_fcc)
+            path["battery_limit_source"] = (
+                "quick_wireless cur_max" if quick_cur is not None
+                else "wireless loop buck_fcc")
+        if getattr(self, "last_cur_decision", None) is not None:
+            path["cur_max_decision"] = copy.deepcopy(self.last_cur_decision)
+        derived["wireless_path"] = path
+
     def _merge_cached_logs(self, core: dict) -> None:
         core["voters"] = copy.deepcopy(self.last_voters)
         core["sessions"] = copy.deepcopy(self.last_sessions)
+        # 独立发布无线功率路径：前端不得把 wireless_buck_input votable 是否出现在
+        # 当前日志窗口，误当成 CP/Buck 路径是否存在。
+        self._decorate_wireless_path(core)
         if self.last_epp is not None:
             self._append_epp_node(core, self.last_epp)
         else:
@@ -1935,29 +1838,25 @@ class Sampler:
                 buck["actual_limit_source"] = (
                     "quick_wireless cur_max" if self.last_quick_cur_max is not None
                     else "wireless loop buck_fcc")
-            # 实时 CP 支路电流与当前会话硬件模式融合：预启动 3~5mA 不能
-            # 单独证明 CP，但已确认 mode 后，瞬时 0mA 也不能推翻 CP。
+            # 活跃无线充电优先使用实时 CP 总线电流；空闲时回退会话日志。
             derived = core.get("derived", {})
+            status = str(core.get("battery", {}).get("status", {}).get("value", ""))
             cp_ibus = derived.get("cp_ibus_total_ma")
-            live_wireless_connected = (
+            input_iout = derived.get("input_current_ma")
+            batt_current = derived.get("batt_current_ma")
+            live_wireless_charging = (
                 derived.get("input_source") == "wireless"
+                and status.lower() == "charging"
+                and isinstance(input_iout, (int, float)) and input_iout > 0
+                and isinstance(batt_current, (int, float)) and batt_current > 0
                 and isinstance(cp_ibus, (int, float))
             )
-            # 低电流时只接受当前 power_good 会话内捕获的 CP 证据；
-            # 防止慢充新会话沿用上一会话的 operation mode/work_mode。
-            cp_mode = self.last_cp_mode if self.last_wls_cp_evidence else None
-            wm = self.last_cp_work_mode if self.last_wls_cp_evidence else None
-            if live_wireless_connected:
-                live_cp_state = classify_wireless_cp_ibus(cp_ibus)
-                cp_state = resolve_wireless_cp_state(
-                    cp_ibus, cp_mode, wm)
-                cp_active = cp_state == "cp"
-                buck["cp_state"] = cp_state
+            wm = self.last_cp_work_mode
+            if live_wireless_charging:
+                cp_active = abs(cp_ibus) >= 1.0
+                buck["cp_state"] = "cp" if cp_active else "buck"
                 buck["cp_active"] = cp_active
-                buck["cp_state_source"] = (
-                    "sysfs_cp_ibus_total+session_cp_mode"
-                    if live_cp_state != cp_state else "sysfs_cp_ibus_total")
-                buck["cp_session_evidence"] = bool(self.last_wls_cp_evidence)
+                buck["cp_state_source"] = "sysfs_cp_ibus_total"
                 buck["cp_ibus_total_ma"] = cp_ibus
                 if cp_active and wm is not None:
                     buck["cp_ratio"] = wm
@@ -1966,20 +1865,17 @@ class Sampler:
                 buck["cp_ratio"] = wm
                 buck["cp_active"] = True
                 buck["cp_state_source"] = "quick_wireless_work_mode"
-                buck["cp_session_evidence"] = bool(self.last_wls_cp_evidence)
-            elif cp_mode is not None:
-                cp_active = cp_mode > 0
+            elif self.last_cp_mode is not None:
+                cp_active = self.last_cp_mode > 0
                 buck["cp_state"] = "cp" if cp_active else "buck"
                 buck["cp_active"] = cp_active
                 buck["cp_state_source"] = "sc8581_operation_mode"
-                buck["cp_session_evidence"] = bool(self.last_wls_cp_evidence)
                 if cp_active and wm is not None:
                     buck["cp_ratio"] = wm
             else:
                 buck["cp_state"] = "unknown"
                 buck["cp_active"] = False
                 buck["cp_state_source"] = "none"
-                buck["cp_session_evidence"] = bool(self.last_wls_cp_evidence)
             if self.last_wls_work_mode_ms is not None:
                 buck["wls_work_mode_ms"] = self.last_wls_work_mode_ms
             if self.last_cur_decision is not None:
@@ -1993,8 +1889,6 @@ class Sampler:
             buck["rx_iout_limit_time"] = self.last_rx_iout_limit_log_time or ""
             buck["rx_iout_limit_stale"] = bool(self.session_logs_stale)
             buck["smartendura_soc_limit"] = bool(self.last_smartendura_soc_limit)
-        # 无线路径状态不依赖 wireless_buck_input topic 是否仍在日志滑窗中。
-        self._decorate_wireless_path(core)
         # 有线 CP 三态：cp / buck / unknown（时间顺序 + CP 证据优先）
         wstate = self.last_wired_state
         core.setdefault("derived", {})["wired_cp"] = {
@@ -2002,7 +1896,6 @@ class Sampler:
             "ratio": self.last_wired_cp_ratio if wstate == "cp" else None,
             "active": wstate == "cp",
             "cur_work_cp": bool(self.last_wired_cur_cp),
-            "session_at": self.last_wired_session_ms or 0,
             "cur_max": (copy.deepcopy(self.last_wired_cur_max)
                         if self.last_wired_cur_max is not None else None),
             "stage_cur_max": (copy.deepcopy(self.last_wired_stage_cur_max)
@@ -2024,87 +1917,6 @@ class Sampler:
             "device": getattr(self.adb, "serial", None) or "",
             "schema_version": 2,
         })
-
-    def _decorate_wireless_path(self, core: dict) -> None:
-        """发布独立 wireless_path；voter topic 仅保留为详情兼容层。"""
-        derived = core.setdefault("derived", {})
-        path: dict = {}
-        path["session_at"] = getattr(self, "last_wls_session_ms", None) or 0
-        if self.last_wls_icl is not None:
-            path.update({
-                "wireless_icl": self.last_wls_icl,
-                "wireless_icl_time": self.last_wls_icl_log_time or "",
-                "wireless_icl_at": self.last_wls_icl_at or 0,
-                "wireless_icl_ms": self.last_wls_icl_ms or 0,
-            })
-            if self.last_wls_chg_en is not None:
-                path["wireless_icl_chg_en"] = self.last_wls_chg_en
-        actual = self.last_quick_cur_max if self.last_quick_cur_max is not None else self.last_buck_fcc
-        if actual is not None:
-            path["battery_limit_ma"] = actual
-            path["battery_limit_source"] = (
-                "quick_wireless cur_max" if self.last_quick_cur_max is not None
-                else "wireless loop buck_fcc")
-        cp_ibus = derived.get("cp_ibus_total_ma")
-        live_wireless_connected = (
-            derived.get("input_source") == "wireless"
-            and isinstance(cp_ibus, (int, float))
-        )
-        cp_mode = self.last_cp_mode if self.last_wls_cp_evidence else None
-        wm = self.last_cp_work_mode if self.last_wls_cp_evidence else None
-        if live_wireless_connected:
-            live_cp_state = classify_wireless_cp_ibus(cp_ibus)
-            cp_state = resolve_wireless_cp_state(cp_ibus, cp_mode, wm)
-            cp_active = cp_state == "cp"
-            cp_source = (
-                "sysfs_cp_ibus_total+session_cp_mode"
-                if live_cp_state != cp_state else "sysfs_cp_ibus_total")
-            path["cp_ibus_total_ma"] = cp_ibus
-        elif wm in (1, 2, 4):
-            cp_state, cp_active, cp_source = "cp", True, "quick_wireless_work_mode"
-        elif cp_mode is not None:
-            cp_active = cp_mode > 0
-            cp_state, cp_source = ("cp" if cp_active else "buck"), "sc8581_operation_mode"
-        else:
-            cp_state, cp_active, cp_source = "unknown", False, "none"
-        path.update({
-            "state": cp_state,
-            "cp_active": cp_active,
-            "cp_state_source": cp_source,
-            "cp_session_evidence": bool(self.last_wls_cp_evidence),
-            "ratio": wm if cp_active and wm in (1, 2, 4) else None,
-            "wls_mode": self.last_wls_mode,
-            "rx_iout_limit": self.last_rx_iout_limit,
-            "rx_iout_limit_captured": self.rx_iout_limit_captured,
-            "rx_iout_limit_at": self.last_rx_iout_limit_at or 0,
-            "rx_iout_limit_time": self.last_rx_iout_limit_log_time or "",
-            "rx_iout_limit_stale": bool(self.session_logs_stale),
-            "smartendura_soc_limit": bool(self.last_smartendura_soc_limit),
-        })
-        if self.last_wls_work_mode_ms is not None:
-            path["wls_work_mode_ms"] = self.last_wls_work_mode_ms
-        if self.last_cur_decision is not None:
-            path["cur_max_decision"] = copy.deepcopy(self.last_cur_decision)
-        derived["wireless_path"] = path
-
-        # 旧前端/投票详情兼容：topic 存在时镜像派生字段，不再依赖 topic 存在。
-        buck = core.get("voters", {}).get("wireless_buck_input")
-        if isinstance(buck, dict):
-            buck.update(copy.deepcopy(path))
-            if "wireless_icl" in path:
-                buck.update({
-                    "icl": path["wireless_icl"],
-                    "icl_time": path.get("wireless_icl_time", ""),
-                    "icl_at": path.get("wireless_icl_at", 0),
-                    "icl_ms": path.get("wireless_icl_ms", 0),
-                })
-            if "battery_limit_ma" in path:
-                buck.update({
-                    "actual_limit": path["battery_limit_ma"],
-                    "actual_limit_source": path.get("battery_limit_source", ""),
-                })
-            if self.last_wls_chg_en is not None:
-                buck["chg_en"] = self.last_wls_chg_en
 
     @staticmethod
     def _append_epp_node(parsed: dict, epp: str) -> None:
@@ -2206,11 +2018,8 @@ class Sampler:
         # 有线输入遥测：按 wired_cp.state 选择来源（CP→regulation，Buck→buckchg，
         # unknown→最新一条），USB uevent 仅作兜底且永远带 source/时间。
         usb = raw.get("usb", {})
-        usb_online_raw = str(usb.get("online", ""))
-        usb_online_state = (
-            True if usb_online_raw == "1"
-            else False if usb_online_raw == "0" else None
-        )
+        usb_online_raw = str(usb.get("online", "")).strip()
+        usb_online_state = True if usb_online_raw == "1" else False if usb_online_raw == "0" else None
         usb_online = usb_online_state is True
         usb_known_off = usb_online_state is False
         usb_vbus_mv = num(usb.get("voltage_now", ""))
@@ -2219,18 +2028,13 @@ class Sampler:
         usb_ibus_ma = num(usb.get("current_now", ""))
         if usb_ibus_ma is not None:
             usb_ibus_ma /= 1000.0          # uA -> mA
-        cp_ibus_total_ma = num(nodes.get("ibus_total", {}).get("value", ""))
-        # SIC-BAT 独立于 div/buck votable，节点原始值为 µA；0 表示未施加可用上限。
-        wired_sic_raw = num(nodes.get("wired_chg_curr", {}).get("value", ""))
-        wired_sic_limit_ma = (wired_sic_raw / 1000.0
-                              if wired_sic_raw is not None and wired_sic_raw > 0 else None)
+
         wireless_signal = (
             vout is not None and iout is not None
-            and vout > 1000 and iout > 100)
-        # ONLINE=0 是有线硬否决；只有字段未知时才允许 VBUS 回退。
-        # ibus_total 是有线/无线 CP 共用测量，绝不能参与输入源判定。
-        input_source = resolve_input_source(
-            usb_online_state, usb_vbus_mv, wireless_signal)
+            and vout > 1000.0 and iout > 100.0
+        )
+        # 物理输入源必须先于共享 ibus_total 归属；ONLINE=0 是有线硬否决。
+        input_source = resolve_input_source(usb_online_state, usb_vbus_mv, wireless_signal)
         wired_present = input_source == "wired"
         wireless_connected = resolve_wireless_connected(
             self.last_wireless_connected, input_source, vout)
@@ -2238,12 +2042,12 @@ class Sampler:
         wstate = self.last_wired_state
         cp_tel = self.last_wired_cp_tel
         buck_tel = self.last_wired_buck_tel
-        if wstate == "cp" and wired_present:
+        if input_source == "wired" and wstate == "cp":
             chosen = cp_tel or buck_tel
         elif wstate == "buck":
             chosen = buck_tel or cp_tel
         elif cp_tel and buck_tel:
-            chosen = cp_tel if cp_tel["at"] >= buck_tel["at"] else buck_tel
+            chosen = cp_tel if cp_tel["log_time"] >= buck_tel["log_time"] else buck_tel
         else:
             chosen = cp_tel or buck_tel
 
@@ -2272,46 +2076,51 @@ class Sampler:
         rt_ibus_ma = None
         rt_source = None
         rt_at = None
+        ibus_total = num(nodes.get("ibus_total", {}).get("value", ""))
+        chg_block = self.last_voters.get("chg_enable") or {}
+        chg_result = chg_block.get("result") if isinstance(chg_block, dict) else None
+        charging_enabled = None
+        if isinstance(chg_result, dict) and chg_result.get("value") is not None:
+            try:
+                charging_enabled = int(float(chg_result.get("value"))) == 1
+            except (TypeError, ValueError):
+                charging_enabled = None
         preferred_wired_source = resolve_wired_input_source(
-            wstate, cp_ibus_total_ma, usb_ibus_ma, usb_online,
-            None if self.last_chg_enabled is None else self.last_chg_enabled == 1,
-            batt_cur_ma)
-        if preferred_wired_source == "cp_ibus_total" and wired_present:
-            if cp_ibus_total_ma is not None:
+            wstate, ibus_total, usb_ibus_ma, usb_online_state is True,
+            charging_enabled, batt_cur_ma)
+        if input_source == "wired" and preferred_wired_source == "cp_ibus_total":
+            if ibus_total is not None:
                 vb = tel_vbus_mv if tel_vbus_mv is not None else usb_vbus_mv
                 if vb is not None:
                     rt_vbus_mv = vb
-                    rt_ibus_ma = cp_ibus_total_ma
+                    rt_ibus_ma = ibus_total
                     rt_source = "cp_ibus_total"
                     rt_at = now_ms
-        if rt_source is None and usb_online:
+        if rt_source is None and input_source == "wired" and usb_online_state is True:
             if usb_vbus_mv is not None and usb_ibus_ma is not None:
                 rt_vbus_mv = usb_vbus_mv
                 rt_ibus_ma = usb_ibus_ma
                 rt_source = "usb_uevent"
                 rt_at = now_ms
-        if (rt_source is None and wired_present
-                and tel_vbus_mv is not None and tel_ibus_ma is not None):
+        if rt_source is None and input_source == "wired" and tel_vbus_mv is not None and tel_ibus_ma is not None:
             rt_vbus_mv = tel_vbus_mv
             rt_ibus_ma = tel_ibus_ma
             rt_source = tel_source
             rt_at = tel_at
-        wired_online = (
-            wired_present and rt_vbus_mv is not None and rt_vbus_mv > 1000
-            and rt_ibus_ma is not None)
+        wired_online = wired_present and rt_vbus_mv is not None and rt_ibus_ma is not None
         # mV × mA = µW，直接换算成 W（除以 1e6），前端只显示 W
         wired_power = (
             rt_vbus_mv * rt_ibus_ma / 1e6
             if wired_online else None
         )
 
-        # 输入源已由 USB ONLINE 三态、无线信号和 VBUS fallback 独立确定；
-        # 这里只选择对应遥测，禁止测量值反向改变来源。
+        # 当前输入源已经由 USB/无线物理证据决定，不能被共享 CP 遥测反向改写。
         if input_source == "wireless":
             input_vol_mv = vout
             input_cur_ma = iout
             input_power = wireless_power
         elif input_source == "wired":
+            input_source = "wired"
             input_vol_mv = rt_vbus_mv
             input_cur_ma = rt_ibus_ma
             input_power = wired_power
@@ -2329,9 +2138,9 @@ class Sampler:
         derived = {
             "vout": vout, "vrect": wls.get("vrect"), "iout": iout,
             "input_source": input_source,
-            "wireless_connected": wireless_connected,
-            "wired_connected": wired_present,
-            "input_connected": wired_present or wireless_connected,
+            "wireless_connected": bool(wireless_connected),
+            "wired_connected": bool(wired_present),
+            "input_connected": bool(wired_present or wireless_connected),
             "input_detail_source": (
                 rt_source if input_source == "wired"
                 else "wls_debug" if input_source == "wireless" else None
@@ -2365,10 +2174,8 @@ class Sampler:
             "wired_tel_stale": wired_stale,
             "wired_tel_log_time": tel_log_time,
             "wired_tel_at": tel_at,
-            "wired_usb_online": usb_online,
-            "cp_ibus_total_ma": cp_ibus_total_ma,
-            "wired_sic_limit_ma": wired_sic_limit_ma,
-            "cp_ibus_owner": cp_ibus_owner(input_source, cp_ibus_total_ma),
+            "wired_usb_online": usb_online_state is True,
+            "cp_ibus_total_ma": num(nodes.get("ibus_total", {}).get("value", "")),
             "battery_power_w": round(battery_power, 2) if battery_power is not None else None,
             "batt_current_ma": round(batt_cur_ma, 1) if batt_cur_ma is not None else None,
             "batt_voltage_mv": round(batt_vol_mv, 1) if batt_vol_mv is not None else None,
