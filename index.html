@@ -441,6 +441,10 @@ let lastGroupsJson = "";
 let lastVotersJson = "";
 let lastSessionsJson = "";
 let lastGroupsStruct = "";
+// 日志通道在轮询边界可能短暂返回空主题；保留同一输入会话的上一张限制卡，
+// 避免“当前限制”整卡闪空，再在新会话/路径真正变化时切换到待捕获。
+let lastLimitSummaryHtml = "";
+let lastLimitContextKey = "";
 
 const KPI = [
   { id: "input_power_w", label: "输入功率", unit: "W", digits: 2, hint: "当前输入 VBUS × IBUS（有线/无线自动切换）" },
@@ -777,13 +781,30 @@ function renderVoters(d) {
   const wideVoteLayout = window.matchMedia("(min-width: 901px)").matches;
   const topics = d.voters || {};
   const keys = Object.keys(topics);
+  const topDerived = d.derived || {};
+  const wiredCpTop = topDerived.wired_cp || {};
+  const wirelessPathTop = topDerived.wireless_path || {};
+  const limitContextKey = JSON.stringify({
+    input: topDerived.input_source || "",
+    wired: !!topDerived.wired_connected,
+    wireless: !!topDerived.wireless_connected,
+    wiredCp: [wiredCpTop.state || "", wiredCpTop.ratio || "", wiredCpTop.session_at || 0],
+    wirelessPath: [wirelessPathTop.state || "", wirelessPathTop.ratio || "", wirelessPathTop.session_at || 0],
+  });
   if (!keys.length) {
     const th = d.thermal || {};
-    $("limitSummary").innerHTML = `<div class="card wide"><div class="chips" style="justify-content:flex-start">` +
-      `<span class="chip summary-thermal"><span class="summary-label">温度与热控</span><b>虚拟 <span id="limitVirtualTemp">${fmt(th.virtual_temp, 1)}°C</span></b>` +
-      `<small>投票待加载</small></span>` +
-      `<span class="chip"><span class="summary-label">当前热控场景</span><b id="limitThermalScene">${esc(th.scene || "--")}</b><small>mi_thermald</small></span>` +
-      `</div></div>`;
+    const canRetain = lastLimitSummaryHtml && lastLimitContextKey === limitContextKey
+      && d.meta && d.meta.logs_stale;
+    if (canRetain) {
+      $("limitSummary").innerHTML = lastLimitSummaryHtml;
+      updateLimitLive(d);
+    } else {
+      $("limitSummary").innerHTML = `<div class="card wide"><div class="chips" style="justify-content:flex-start">` +
+        `<span class="chip summary-thermal"><span class="summary-label">温度与热控</span><b>虚拟 <span id="limitVirtualTemp">${fmt(th.virtual_temp, 1)}°C</span></b>` +
+        `<small>投票待加载</small></span>` +
+        `<span class="chip"><span class="summary-label">当前热控场景</span><b id="limitThermalScene">${esc(th.scene || "--")}</b><small>mi_thermald</small></span>` +
+        `</div></div>`;
+    }
     el.innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">最近日志</span></h2>` +
       `<p class="note">日志中暂无投票表输出。</p></div>`;
     return;
@@ -949,6 +970,74 @@ function renderVoters(d) {
       }
     }
     return null;
+  };
+  const wiredSicRaw = Number(d.derived && d.derived.wired_sic_limit_ma);
+  const wiredSicLimit = Number.isFinite(wiredSicRaw) && wiredSicRaw > 0
+    ? wiredSicRaw : null;
+  const addWiredThermalLimit = (label, pathLimit, pathSource) => {
+    if (!pathLimit && wiredSicLimit === null) return false;
+    const pathValue = pathLimit ? Number(pathLimit.value) : null;
+    const useSic = wiredSicLimit !== null && (pathValue === null || wiredSicLimit < pathValue);
+    const value = useSic ? wiredSicLimit : pathValue;
+    const sources = [];
+    if (pathLimit) sources.push(pathSource);
+    if (wiredSicLimit !== null) sources.push("SIC-BAT");
+    summary.push(`<span class="chip" title="有线热控上限取当前路径 MONITOR-BAT 票与 SIC-BAT 动态 PID 上限中的较小值；${esc(sources.join(" + "))}">` +
+      `${label}<b>${fmt(value, 0)}mA</b><small>${esc(useSic ? "SIC-BAT" : pathSource)}</small></span>`);
+    return true;
+  };
+  // 有线 CP 的“当前电池充电上限”统一取当前会话算法目标、当前 div 热控票和
+  // SIC-BAT 动态上限中的最小值；主卡只显示最终瓶颈，完整候选放在 title 详情。
+  const freshWiredCpDecision = (obj, stale) => {
+    if (!obj || stale) return null;
+    const at = Number(obj.at);
+    const age = Number.isFinite(at) && at > 0 ? (Date.now() - at) / 1000 : Infinity;
+    if (!Number.isFinite(age) || age < -5 || age > 30) return null;
+    return { obj, age: Math.max(0, Math.round(age)) };
+  };
+  const addWiredCpEffectiveLimit = (pathLimit, pathSource, wcp, stale) => {
+    const finalHit = freshWiredCpDecision(wcp && wcp.cur_max, stale);
+    const stageHit = freshWiredCpDecision(wcp && wcp.stage_cur_max, stale);
+    const qcTargetHit = freshWiredCpDecision(wcp && wcp.qc_target, stale);
+    let qcValue = null;
+    let qcSource = "";
+    if (finalHit && Number.isFinite(Number(finalHit.obj.cur_max)) && Number(finalHit.obj.cur_max) > 0) {
+      qcValue = Number(finalHit.obj.cur_max);
+      qcSource = "Quick Charge Final";
+    } else if (stageHit
+        && Number.isFinite(Number(stageHit.obj.cur_max))
+        && Number.isFinite(Number(stageHit.obj.delta))) {
+      const derived = Number(stageHit.obj.cur_max) - Number(stageHit.obj.delta);
+      if (derived > 0) {
+        qcValue = derived;
+        qcSource = "Quick Charge 阶段目标";
+      }
+    }
+    if (qcValue === null && qcTargetHit
+        && Number.isFinite(Number(qcTargetHit.obj.fcc))
+        && Number(qcTargetHit.obj.fcc) > 0) {
+      qcValue = Number(qcTargetHit.obj.fcc);
+      qcSource = "QC 调节目标";
+    }
+    if (qcValue === null) {
+      summary.push(`<span class="chip" title="有线 CP 的电池上限需要当前会话的新鲜 Quick Charge Final、阶段目标或 QC 调节目标；未捕获时不使用旧分压热控票冒充当前值">当前电池充电上限<b>--</b><small>Quick Charge/QC 目标待捕获</small></span>`);
+      return false;
+    }
+    const candidates = [{ value: qcValue, source: qcSource }];
+    if (pathLimit && Number.isFinite(Number(pathLimit.value)) && Number(pathLimit.value) > 0) {
+      candidates.push({ value: Number(pathLimit.value), source: pathSource });
+    }
+    if (wiredSicLimit !== null) candidates.push({ value: wiredSicLimit, source: "SIC-BAT" });
+    const selected = candidates.reduce((a, b) => b.value < a.value ? b : a);
+    const winners = candidates.filter(c => c.value === selected.value);
+    const detail = candidates.map(c => `${c.source} ${fmt(c.value, 0)}mA`).join(" · ");
+    const compactSource = source => String(source)
+      .replace(/^div[124]_(?:single|multi)(?:\/div[124]_(?:single|multi))? · mca_thermal$/, "mca_thermal");
+    const winnerLabel = winners.map(c => compactSource(c.source)).join(" + ");
+    const selectedSmall = `${winnerLabel}${winners.length > 1 ? " · 并列瓶颈" : ""}`;
+    summary.push(`<span class="chip" title="有线 CP 当前上限取 Quick Charge Final/阶段目标或 QC 调节目标、当前分压 MONITOR-BAT 热控票与 SIC-BAT 动态上限中的最小值；${esc(detail)}">` +
+      `当前电池充电上限<b>${fmt(selected.value, 0)}mA</b><small>${esc(selectedSmall)}</small></span>`);
+    return true;
   };
   const summary = [];
   const addSummary = (label, eff, fmt) => {
@@ -1208,6 +1297,40 @@ function renderVoters(d) {
     `<span class="summary-label">当前热控场景</span><b id="limitThermalScene">${esc(th.scene || "--")}</b>` +
     `<small>mi_thermald</small></span>`);
 
+  // 旧版 Web 在有线 CP 下会同时输出“Quick Charge 算法目标、CP 路径限制、
+  // 综合有效上限”三张摘要卡。它们来自同一组候选值，容易在日志刷新边界造成
+  // 短暂的顺序错乱和重复解读；统一收敛为一个最终瓶颈卡，候选仍在 title 中保留。
+  if (wiredActive && topDerived.wired_cp && topDerived.wired_cp.state === "cp" && !ceStopped) {
+    for (let i = summary.length - 1; i >= 0; i--) {
+      if (/(?:Quick Charge 算法目标|Quick Charge\/QC 目标|阶段算法目标|QC 调节目标|路径限制|综合有效上限)/.test(summary[i])) {
+        summary.splice(i, 1);
+      }
+    }
+    const wcp = topDerived.wired_cp;
+    const ratio = wcp.ratio;
+    const divSingle = ratio === 4 ? "div4_single"
+      : ratio === 2 ? "div2_single"
+      : ratio === 1 ? "div1_single" : null;
+    const divMulti = ratio === 4 ? "div4_multi"
+      : ratio === 2 ? "div2_multi"
+      : ratio === 1 ? "div1_multi" : null;
+    const limSingle = divSingle ? effectiveOf(topics[divSingle]) : null;
+    const limMulti = divMulti ? effectiveOf(topics[divMulti]) : null;
+    let cpLimit = null;
+    let cpLimitSource = "";
+    if (limSingle && limMulti) {
+      if (limSingle.value === limMulti.value) {
+        cpLimit = limSingle;
+        cpLimitSource = `${divSingle}/${divMulti} · mca_thermal`;
+      }
+    } else if (limSingle || limMulti) {
+      cpLimit = limSingle || limMulti;
+      cpLimitSource = `${limSingle ? divSingle : divMulti} · mca_thermal`;
+    }
+    addWiredCpEffectiveLimit(cpLimit, cpLimitSource, wcp,
+      d.meta && d.meta.power_path_logs_stale);
+  }
+
   const summaryRank = html => {
     if (/充电路径|当前功率路径/.test(html)) return 0;
     if (/当前电池充电电流上限|电池充电上限|综合有效上限|Quick Charge 算法目标/.test(html)) return 10;
@@ -1399,6 +1522,10 @@ function renderVoters(d) {
   const noVoteNote = chargingNow && noRelevant
     ? `<div class="card wide"><h2>当前没有生效投票</h2>` +
       `<p class="note">无线/有线主题尚未出现有效票，等待下一次日志刷新。</p></div>` : "";
+  if (summaryCard) {
+    lastLimitSummaryHtml = summaryCard;
+    lastLimitContextKey = limitContextKey;
+  }
   $("limitSummary").innerHTML = summaryCard;
   updateLimitLive(d);
   el.innerHTML = quickCard + notChargingNote + noVoteNote + cardsShown + extraJeitaCard;
@@ -1604,6 +1731,8 @@ function resetRenderSignatures() {
   lastVotersJson = "";
   lastSessionsJson = "";
   lastGroupsStruct = "";
+  lastLimitSummaryHtml = "";
+  lastLimitContextKey = "";
 }
 
 let lastMeta = {};

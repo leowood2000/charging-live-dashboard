@@ -4,6 +4,9 @@
 
 ## 功能特性
 
+- **有线 CP 限制摘要收敛**：主卡只显示最终瓶颈（Quick Charge/QC 目标、当前 div 热控与 SIC-BAT 取最小值）；非瓶颈候选保留在详情提示，避免 `12,400mA` 与 `15,500mA` 同时被误读为两个执行上限。
+- **限制卡时序稳定**：日志通道在刷新边界短暂为空时，同一输入会话保留上一张稳定限制卡；新会话或路径变化不会沿用旧卡。
+
 - **有线 HVDCP/QC3 目标兼容**：当前会话若没有 `mca_quick_charge_select_max_ibat` 的 Quick Charge Final，解析 `mca_qc_get_vbus_change_trend` 的 `target_limit_fcc_ma` 并标为“QC 调节目标”；该值仍与当前 div 热控票取证，不冒充 Quick Charge Final。
 
 - **自适应双周期采集**：充电时快速采集 3 秒，未充电时 12 秒，页面超过 30 秒无访问时 45 秒；日志采集 10 秒（断开时 60 秒），避免后台持续唤醒手机或每 3 秒重扫几 MB 日志

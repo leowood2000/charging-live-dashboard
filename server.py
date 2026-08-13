@@ -2041,6 +2041,13 @@ class Sampler:
         temp_c = temp_raw / 10.0 if temp_raw is not None else None
         capacity = num(battery.get("capacity", {}).get("value", ""))
 
+        # wired_chg_curr 原始单位为 µA；与 Android 端一致发布为 mA，
+        # 供有线 CP/Buck 当前电池上限与 div/buck 热控票取最小值。
+        wired_sic_raw = num(nodes.get("wired_chg_curr", {}).get("value", ""))
+        wired_sic_limit_ma = wired_sic_raw / 1000.0 if wired_sic_raw is not None else None
+        if wired_sic_limit_ma is not None and wired_sic_limit_ma <= 0:
+            wired_sic_limit_ma = None
+
         vout = wls.get("vout")
         iout = wls.get("iout")
         wireless_power = (
@@ -2171,6 +2178,9 @@ class Sampler:
 
         derived = {
             "vout": vout, "vrect": wls.get("vrect"), "iout": iout,
+            "wired_sic_limit_ma": (
+                round(wired_sic_limit_ma, 1) if wired_sic_limit_ma is not None else None
+            ),
             "input_source": input_source,
             "wireless_connected": bool(wireless_connected),
             "wired_connected": bool(wired_present),
