@@ -316,9 +316,13 @@ class AdbReader:
         if not self.available:
             return False, ""
         grep_args = (
-            "-e 'power_good' -e 'AUTHEN_FINISH' -e 'uuid_value' "
+            "-e 'power_good' -e 'usb online' -e 'real_type changed' "
+            "-e 'AUTHEN_FINISH' -e 'uuid_value' "
             "-e 'TX_ADAPTER' -e 'FAST_CHARGE' -e 'fast chg success' "
             "-e 'set chg current' -e 'open path ibus' "
+            "-e 'sc8581_set_operation_mode' -e 'mca_quick_charge_update_work_mode_para' "
+            "-e 'strategy_quickchg_map_ibus_to_fsw' -e 'cur_work_cp' "
+            "-e 'strategy_quickchg_enable_buck_charging' "
             "-e 'smartchg_soc_limit_callback' "
             "-e 'strategy_wireless_get_qc_enable' "
             "-e 'strategy_wireless_get_charging_info' "
@@ -1177,6 +1181,11 @@ def classify_session_line(line: str):
         return ("wired_off", "有线充电移除", "")
     if "usb online: 1" in line:
         return ("wired_on", "有线充电接入", "")
+    m = re.search(r"real_type changed: (\d+) => (\d+)", line)
+    if m:
+        if m.group(2) == "0":
+            return ("wired_off", "有线充电移除", "")
+        return ("wired_type", "有线协议变化", f"{m.group(1)}→{m.group(2)}")
     if "RX_INT_AUTHEN_FINISH" in line:
         return ("auth", "私有协议认证完成", "")
     m = re.search(r"uuid_value is (\S+)", line)
@@ -1190,6 +1199,20 @@ def classify_session_line(line: str):
     m = re.search(r"fast chg success: (\d+)", line)
     if m:
         return ("fcflag", "快充成功标志", m.group(1))
+    m = re.search(r"sc8581_set_operation_mode:\d+ .*set operation mode (\d+) reg (\d+) work_mode (\d+)", line)
+    if m:
+        return ("cp_mode", "CP 模式信号", f"operation_mode {m.group(1)} · work_mode {m.group(3)}")
+    m = re.search(r"strategy_quickchg_map_ibus_to_fsw:\d+ .*ibus_avg: (\d+), ratio: (\d+), cp_iout: (\d+)", line)
+    if m:
+        return ("cp_ratio", "CP 分压比", f"ratio {m.group(2)}:1 · ibus_avg {m.group(1)}mA · cp_iout {m.group(3)}mA")
+    m = re.search(r"mca_quick_charge_select_max_ibat:\d+ .*cur_stage (\d+) cur_max (\d+) delta_cur (\d+) cur_work_cp", line)
+    if m:
+        return ("cp_active", "CP 充电路径运行", f"stage {m.group(1)} · cur_max {m.group(2)}mA · delta {m.group(3)}mA")
+    m = re.search(r"strategy_quickchg_enable_buck_charging:\d+ (enable|disable) buck parallel charging!.*?ibus\s*: ?(\d+)", line)
+    if m:
+        return ("buck_parallel_on" if m.group(1) == "enable" else "buck_parallel_off",
+                "Buck 并行充电启用" if m.group(1) == "enable" else "Buck 并行充电关闭",
+                f"ibus {m.group(2)}mA")
     m = re.search(r"set chg current (\d+)", line)
     if m:
         return ("ichg", "设置充电电流", m.group(1))
@@ -1212,6 +1235,12 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
     """
     sessions: list[dict] = []
     cur: dict | None = None
+    ichg_event: dict | None = None
+    ichg_values: list[int] = []
+    last_cp_mode_event: str | None = None
+    last_cp_ratio_event: int | None = None
+    last_cp_stage_event: int | None = None
+    last_buck_parallel_event: bool | None = None
     for line in text.splitlines():
         tm = VOTE_TIME_RE.search(line)
         ev = classify_session_line(line)
@@ -1231,7 +1260,13 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
                 "peak_limit_ma": None, "final_limit_ma": None,
             }
             sessions.append(cur)
-            if kind == "on":
+            ichg_event = None
+            ichg_values = []
+            last_cp_mode_event = None
+            last_cp_ratio_event = None
+            last_cp_stage_event = None
+            last_buck_parallel_event = None
+            if kind in ("on", "wired_on"):
                 cur["events"].append({"kind": kind, "time": t, "label": label, "detail": detail})
             continue
         if cur is None:
@@ -1239,8 +1274,7 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
         evs = cur["events"]
         if kind in ("off", "wired_off"):
             cur["ended"] = True
-            if kind == "off":
-                evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
             # 断开后不再向已结束会话追加日志
             cur = None
             continue
@@ -1259,26 +1293,38 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
         elif kind == "fcflag":
             cur["fc_flag"] = detail
             evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+        elif kind == "wired_type":
+            evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+        elif kind == "cp_mode":
+            if detail != last_cp_mode_event:
+                evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+                last_cp_mode_event = detail
+        elif kind == "cp_ratio":
+            ratio_match = re.search(r"ratio (\d+):1", detail)
+            ratio = int(ratio_match.group(1)) if ratio_match else None
+            if ratio != last_cp_ratio_event:
+                evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+                last_cp_ratio_event = ratio
+        elif kind == "cp_active":
+            stage_match = re.search(r"stage (\d+)", detail)
+            stage = int(stage_match.group(1)) if stage_match else None
+            if stage != last_cp_stage_event:
+                evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+                last_cp_stage_event = stage
+        elif kind in ("buck_parallel_on", "buck_parallel_off"):
+            enabled = kind == "buck_parallel_on"
+            if last_buck_parallel_event is None or enabled != last_buck_parallel_event:
+                evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+                last_buck_parallel_event = enabled
         elif kind == "ichg":
             v = int(detail)
-            if len(sessions) == 1 and evs and evs[-1].get("kind") == "ichg":
-                prev = evs[-1]
-                if "→" in str(prev.get("detail", "")):
-                    mprev = re.search(r"^(\d+)", str(prev.get("detail", "")))
-                    first = int(mprev.group(1)) if mprev else v
-                    count_match = re.search(r"· (\d+)次", str(prev.get("detail", "")))
-                    count = int(count_match.group(1)) + 1 if count_match else 2
-                    prev["time"] = t
-                    prev["detail"] = f"{first}→{v}mA · {count}次"
-                else:
-                    try:
-                        first = int(str(prev.get("detail", "")).split()[0])
-                    except (TypeError, ValueError):
-                        first = v
-                    evs.append({"kind": kind, "time": t, "label": label,
-                                "detail": f"{first}→{v}mA · 2次"})
+            ichg_values.append(v)
+            if ichg_event is None:
+                ichg_event = {"kind": kind, "time": t, "label": label, "detail": detail}
+                evs.append(ichg_event)
             else:
-                evs.append({"kind": kind, "time": t, "label": label, "detail": detail})
+                ichg_event["time"] = t
+                ichg_event["detail"] = "→".join(str(x) for x in ichg_values) + f"mA · {len(ichg_values)}次"
             if cur["peak_limit_ma"] is None or v > cur["peak_limit_ma"]:
                 cur["peak_limit_ma"] = v
             cur["final_limit_ma"] = v
@@ -1292,6 +1338,7 @@ def parse_sessions(text: str, offset_minutes: int = 0) -> list:
     while len(sessions) > 1:
         sessions.pop(0)
     for s in sessions:
+        s["events"].sort(key=lambda e: e.get("time", ""))
         while len(s["events"]) > 100:
             s["events"].pop(0)
     return sessions
