@@ -40,6 +40,12 @@ USB_UEVENT = "/sys/class/power_supply/usb/uevent"
 MCA_LOG_DIR = "/data/vendor/bsplog/charge/charge_logger/mca_log"
 THERMAL_DUMP = "/data/vendor/thermal/thermal.dump"
 
+# 投票日志是事件式输出：正常运行时只需读取上次偏移后的新增内容。
+# 长时间未运行或日志轮转后不追赶全部历史，直接回退到最新 2 MiB。
+VOTE_INCREMENT_MAX_BYTES = 256 * 1024
+VOTE_OVERLAP_BYTES = 64 * 1024
+VOTE_FALLBACK_BYTES = 2 * 1024 * 1024
+
 
 def _detect_version() -> str:
     """Git short hash（启动时的版本标识），失败时返回 dev。"""
@@ -168,6 +174,12 @@ class AdbReader:
         self.last_error = ""
         self.last_reconnect_at = time.monotonic()
         self.utc_offset_minutes = 0
+        # Vote tables are emitted on changes, not continuously. Keep a bounded
+        # cursor while the process is active; never catch up an unbounded gap
+        # after a long period without the dashboard.
+        self.vote_file = ""
+        self.vote_offset = 0
+        self.vote_cursor_ready = False
         self._init()
         if self.available:
             self.utc_offset_minutes = self._get_utc_offset()
@@ -281,30 +293,88 @@ class AdbReader:
             self.last_error = "adb executable not found in PATH"
             return {}
 
-    def read_vote_logs(self, tail_bytes: int = 2097152) -> tuple[bool, str]:
-        """Tail the newest mca_log, filtered to mca_vote lines.
+    def read_vote_logs(self, tail_bytes: int = VOTE_FALLBACK_BYTES,
+                       allow_older_fallback: bool = False) -> tuple[bool, str]:
+        """Read vote changes incrementally with a hard catch-up cap.
 
-        Returns (read_ok, text)：read_ok 表示 ADB/su/文件读取成功；
-        grep 无匹配（退出码 1）不算读取失败，text 可能为空。
+        Vote tables are event-driven. While the dashboard is active, read only
+        the bytes appended after the last cursor (with a small overlap so a
+        VOTER header split across reads is retained). If the app was inactive
+        for too long or the log rotated, discard the old gap and read at most
+        the newest 2 MiB. On a cold start with no cached voters, also include
+        one older-file tail in the same shell command; this is a rare recovery
+        path, not a per-poll scan.
         """
         if not self.available:
             return False, ""
         try:
-            code, out, _ = self._run(
-                ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n 1"'], timeout=10)
-            if code != 0 or not out.strip():
+            # One shell round-trip obtains the newest file, size, and the
+            # bounded vote chunk. This avoids a separate stat/grep wakeup.
+            code, listing, _ = self._run(
+                ["shell", "su", "-c",
+                 f'"ls -t {MCA_LOG_DIR}/ | head -n 2"'], timeout=10)
+            if code != 0 or not listing.strip():
                 return False, ""
-            fname = out.strip().splitlines()[0]
-            if not re.fullmatch(r"[A-Za-z0-9_.\-]+", fname):
+            files = [f.strip() for f in listing.splitlines()
+                     if re.fullmatch(r"[A-Za-z0-9_.\-]+", f.strip())]
+            if not files:
                 return False, ""
-            self.last_log_fname = fname
+            fname = files[0]
+            older = files[1] if len(files) > 1 else ""
             path = f"{MCA_LOG_DIR}/{fname}"
-            code, out, _ = self._run(
-                ["shell", "su", "-c", f'"tail -c {tail_bytes} {path} | grep -a -F \'mca_vote\'"'],
-                timeout=15)
-            # grep 无匹配时退出码为 1，属于“读取成功但无内容”，不算失败
-            return (code in (0, 1), out if code in (0, 1) else "")
-        except FileNotFoundError:
+            # stat is available in toybox; wc is a safe fallback on older builds.
+            code, meta_out, _ = self._run(
+                ["shell", "su", "-c",
+                 f'"stat -c %s {path} 2>/dev/null || wc -c < {path}"'], timeout=10)
+            if code != 0:
+                return False, ""
+            size_match = re.search(r"(\d+)", meta_out)
+            if not size_match:
+                return False, ""
+            size = int(size_match.group(1))
+            same_file = self.vote_cursor_ready and self.vote_file == fname
+            delta = size - self.vote_offset if same_file else -1
+            incremental = same_file and 0 <= delta <= VOTE_INCREMENT_MAX_BYTES
+            if incremental:
+                start = max(0, self.vote_offset - VOTE_OVERLAP_BYTES)
+                count = max(0, size - start)
+                aligned = (start // 4096) * 4096
+                skip = aligned // 4096
+                prefix = start - aligned
+                chunk = (
+                    f"dd if={path} bs=4096 skip={skip} 2>/dev/null "
+                    f"| tail -c +{prefix + 1} | head -c {count}"
+                )
+                mode = "incremental"
+            else:
+                chunk = f"tail -c {int(tail_bytes)} {path}"
+                mode = "tail"
+            grep_chunk = f"{chunk} | grep -a -F 'mca_vote'"
+            script = ""
+            # Only a cold-start/empty-cache read gets one older-file recovery
+            # tail. Older data is emitted first and current data last so the
+            # parser's newest topic block wins deterministically.
+            if allow_older_fallback and older:
+                script += (
+                    f"echo __VOTE_OLDER__{older}; "
+                    f"tail -c {int(tail_bytes)} {MCA_LOG_DIR}/{older} "
+                    "| grep -a -F 'mca_vote'; "
+                )
+            script += (
+                f"echo '__VOTE_CURSOR__{fname}|{size}|{mode}'; "
+                f"{grep_chunk}; exit 0"
+            )
+            code, out, _ = self._run(["shell", "su", "-c", f'"{script}"'], timeout=20)
+            if code not in (0, 1):
+                return False, ""
+            # The cursor advances after a successful bounded read even when
+            # grep found no event lines; the next poll then reads only new data.
+            self.vote_file = fname
+            self.vote_offset = size
+            self.vote_cursor_ready = True
+            self.last_log_fname = fname
+            return True, out
+        except (FileNotFoundError, ValueError):
             return False, ""
 
     def read_session_logs(self, tail_bytes: int = 4194304, file_count: int = 2) -> tuple[bool, str]:
@@ -1400,6 +1470,7 @@ class Sampler:
         # 有线功率路径状态：cp / buck / unknown（时间顺序 + CP 证据优先）
         self.last_wired_state: str = "unknown"
         self.last_wired_cp_ratio: int | None = None
+        self.last_wired_session_ms: int = 0
         self.last_wired_cur_cp: bool = False
         self.last_wired_buck: bool = False
         # 有线 CP quick_charge cur_max：1611 最终行 / 1597 阶段行
@@ -1549,7 +1620,10 @@ class Sampler:
     def collect_logs(self) -> None:
         if not self.adb.ensure_connected():
             return
-        vote_read_ok, vote_log = self.adb.read_vote_logs()
+        # Only an empty in-memory voter cache gets the one-shot older-file
+        # recovery. Normal polls use the bounded cursor path only.
+        vote_read_ok, vote_log = self.adb.read_vote_logs(
+            allow_older_fallback=not bool(self.last_voters))
         session_read_ok, session_log = self.adb.read_session_logs()
         pp_read_ok, pp_log = self.adb.read_power_path_logs()
         # 三条通道独立 stale：功率路径失败不再拖累 session/vote 主链路
@@ -1874,6 +1948,13 @@ class Sampler:
             "rx_iout_limit_stale": bool(getattr(self, "session_logs_stale", False)),
             "smartendura_soc_limit": bool(getattr(self, "last_smartendura_soc_limit", False)),
         }
+        if getattr(self, "last_wls_icl", None) is not None:
+            path.update({
+                "wireless_icl": self.last_wls_icl,
+                "wireless_icl_time": getattr(self, "last_wls_icl_log_time", "") or "",
+                "wireless_icl_at": getattr(self, "last_wls_icl_at", None) or 0,
+                "wireless_icl_ms": getattr(self, "last_wls_icl_ms", None) or 0,
+            })
         if isinstance(cp_ibus, (int, float)) and live_wireless:
             path["cp_ibus_total_ma"] = cp_ibus
         if getattr(self, "last_wls_work_mode_ms", None) is not None:
@@ -1975,6 +2056,7 @@ class Sampler:
             "ratio": self.last_wired_cp_ratio if wstate == "cp" else None,
             "active": wstate == "cp",
             "cur_work_cp": bool(self.last_wired_cur_cp),
+            "session_at": self.last_wired_session_ms or 0,
             "cur_max": (copy.deepcopy(self.last_wired_cur_max)
                         if self.last_wired_cur_max is not None else None),
             "stage_cur_max": (copy.deepcopy(self.last_wired_stage_cur_max)

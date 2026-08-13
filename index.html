@@ -776,6 +776,67 @@ function updateLimitLive(d) {
   if (th.scene) set("limitThermalScene", th.scene);
 }
 
+// 投票日志是事件式输出；首次打开或日志轮转窗口没有 mca_vote 时，
+// 仍用实时/会话派生值维持当前限制摘要，不能把“暂无投票行”误显示成“没有限制”。
+function renderDerivedLimitFallback(d) {
+  const der = d.derived || {};
+  const th = d.thermal || {};
+  const wp = der.wireless_path || {};
+  const wc = der.wired_cp || {};
+  const source = der.input_source || "";
+  const wired = source === "wired" || (source === "" && !!der.wired_connected);
+  const wireless = !wired && (source === "wireless" || !!der.wireless_connected);
+  const status = String(d.battery && d.battery.status && d.battery.status.value || "").toLowerCase();
+  const ibat = Number(der.batt_current_ma);
+  const nearZero = Number.isFinite(ibat) && Math.abs(ibat) <= 300;
+  const stopped = (status === "not charging" || status === "full" || status === "") && nearZero;
+  const chips = [];
+  const pathText = () => {
+    if (wireless && stopped) return "旁路供电";
+    if (wired && stopped) return "已停止";
+    if (wireless && wp.state === "cp") {
+      const r = Number(wp.ratio);
+      return Number.isFinite(r) && r > 0 ? `CP · ${r}:1` : "CP";
+    }
+    if (wireless && wp.state === "buck") return "Buck";
+    if (wired && wc.state === "cp") {
+      const r = Number(wc.ratio);
+      return Number.isFinite(r) && r > 0 ? `CP · ${r}:1` : "CP";
+    }
+    if (wired && wc.state === "buck") return "Buck";
+    return "待确认";
+  };
+  if (wired || wireless || der.input_connected) {
+    chips.push(`<span class="chip summary-path"><span class="summary-label">充电路径</span><b>${esc(pathText())}</b><small>实时/会话派生</small></span>`);
+  }
+  const limit = wireless ? Number(wp.battery_limit_ma)
+    : wc.cur_max && Number(wc.cur_max.cur_max);
+  if (!stopped) {
+    chips.push(`<span class="chip summary-primary"><span class="summary-label">当前电池充电上限</span><b>${Number.isFinite(limit) && limit > 0 ? fmt(limit, 0) + "mA" : "--"}</b><small>${Number.isFinite(limit) && limit > 0 ? esc(wp.battery_limit_source || "会话派生") : "投票日志待刷新"}</small></span>`);
+  } else {
+    chips.push(`<span class="chip summary-primary"><span class="summary-label">当前电池充电上限</span><b>--</b><small>已停止</small></span>`);
+  }
+  if (wireless && stopped && Number.isFinite(Number(wp.wireless_icl))) {
+    chips.push(`<span class="chip summary-primary"><span class="summary-label">无线输入 ICL（旁路）</span><b>${fmt(wp.wireless_icl, 0)}mA</b><small>无线 Buck/PMIC 支路</small></span>`);
+  }
+  if (Number.isFinite(ibat)) {
+    chips.push(`<span class="chip summary-secondary summary-battery-actual"><span class="summary-label">实际电池电流</span><b>${ibat > 0 ? "+" : ""}${fmt(ibat, 0)}mA</b><small>battery</small></span>`);
+  }
+  if (wireless && wp.state === "cp" && Number.isFinite(Number(wp.rx_iout_limit))) {
+    chips.push(`<span class="chip summary-primary"><span class="summary-label">RX 输出允许上限</span><b>${fmt(wp.rx_iout_limit, 0)}mA</b><small>rx_iout_limit</small></span>`);
+  }
+  if (wireless && Number.isFinite(Number(der.iout))) {
+    chips.push(`<span class="chip summary-secondary summary-input-actual"><span class="summary-label">实际 RX 输出</span><b>${fmt(der.iout, 0)}mA</b><small>wls_debug</small></span>`);
+  } else if (wired && Number.isFinite(Number(der.wired_ibus_ma))) {
+    const wiredInputLabel = stopped ? "外部系统输入（旁路）" : "有线输入实测";
+    chips.push(`<span class="chip summary-secondary summary-input-actual"><span class="summary-label">${wiredInputLabel}</span><b>${fmt(der.wired_ibus_ma, 0)}mA</b><small>${esc(der.wired_input_source || "实时输入")}</small></span>`);
+  }
+  chips.push(`<span class="chip summary-thermal"><span class="summary-label">温度与热控</span><b>虚拟 <span id="limitVirtualTemp">${fmt(th.virtual_temp, 1)}°C</span></b><small>投票日志待刷新</small></span>`);
+  chips.push(`<span class="chip"><span class="summary-label">当前热控场景</span><b id="limitThermalScene">${esc(th.scene || "--")}</b><small>mi_thermald</small></span>`);
+  chips.push(`<span class="chip"><small>投票日志待刷新；以上限制值来自实时/会话派生状态</small></span>`);
+  return `<div class="card wide"><div class="chips" style="justify-content:flex-start">${chips.join("")}</div></div>`;
+}
+
 function renderVoters(d) {
   const el = $("voteTopics");
   const wideVoteLayout = window.matchMedia("(min-width: 901px)").matches;
@@ -790,20 +851,17 @@ function renderVoters(d) {
     wireless: !!topDerived.wireless_connected,
     wiredCp: [wiredCpTop.state || "", wiredCpTop.ratio || "", wiredCpTop.session_at || 0],
     wirelessPath: [wirelessPathTop.state || "", wirelessPathTop.ratio || "", wirelessPathTop.session_at || 0],
+    batteryStatus: d.battery && d.battery.status && d.battery.status.value || "",
+    batteryBand: Number.isFinite(Number(topDerived.batt_current_ma)) && Math.abs(Number(topDerived.batt_current_ma)) <= 300 ? "near-zero" : "flowing",
   });
   if (!keys.length) {
-    const th = d.thermal || {};
-    const canRetain = lastLimitSummaryHtml && lastLimitContextKey === limitContextKey
-      && d.meta && d.meta.logs_stale;
+    const canRetain = lastLimitSummaryHtml && lastLimitContextKey === limitContextKey;
     if (canRetain) {
       $("limitSummary").innerHTML = lastLimitSummaryHtml;
       updateLimitLive(d);
     } else {
-      $("limitSummary").innerHTML = `<div class="card wide"><div class="chips" style="justify-content:flex-start">` +
-        `<span class="chip summary-thermal"><span class="summary-label">温度与热控</span><b>虚拟 <span id="limitVirtualTemp">${fmt(th.virtual_temp, 1)}°C</span></b>` +
-        `<small>投票待加载</small></span>` +
-        `<span class="chip"><span class="summary-label">当前热控场景</span><b id="limitThermalScene">${esc(th.scene || "--")}</b><small>mi_thermald</small></span>` +
-        `</div></div>`;
+      $("limitSummary").innerHTML = renderDerivedLimitFallback(d);
+      updateLimitLive(d);
     }
     el.innerHTML = `<div class="card"><h2>电流投票实时表<span class="tag">最近日志</span></h2>` +
       `<p class="note">日志中暂无投票表输出。</p></div>`;
