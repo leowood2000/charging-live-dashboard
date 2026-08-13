@@ -1031,13 +1031,22 @@ function renderVoters(d) {
       }
       summary.push(`<span class="chip" title="有线 CP 状态：电荷泵 operation mode + quickchg work_mode/ratio + cur_work_cp（内核日志符号 sc8581，设备树 SC8585）${ppStaleD ? " · 路径日志读取异常，显示上次成功状态" : ""}">充电路径<b>${esc(wPath)}</b>${staleD ? `<small>${esc(staleD.replace(/^ · /, ""))}</small>` : ""}</span>`);
       if (wcp.state === "cp") {
-        // 有线 CP：Quick Charge 算法目标（1611 型 cur_max 优先，1597 型阶段值兜底），绝不用 buck_charge_curr 顶替
+        // 有线 CP：Quick Charge Final/阶段目标优先；HVDCP/QC3 没有 Final 时使用
+        // target_limit_fcc_ma 作为“QC 调节目标”，绝不用 buck_charge_curr 顶替。
         if (!ceStopped) {
-          const wd = wcp.cur_max && wcp.cur_max.cur_max !== undefined && wcp.cur_max.cur_max !== null
-            ? wcp.cur_max : null;
-          const wst = wcp.stage_cur_max && wcp.stage_cur_max.cur_max !== undefined
-            && wcp.stage_cur_max.cur_max !== null ? wcp.stage_cur_max : null;
           const curAge = o => (o && o.at) ? Math.max(0, Math.round((Date.now() - o.at) / 1000)) : null;
+          const fresh = o => {
+            const age = curAge(o);
+            return o && age !== null && age <= 30 ? o : null;
+          };
+          const wd = fresh(wcp.cur_max && wcp.cur_max.cur_max !== undefined
+            ? wcp.cur_max : null);
+          const wst = fresh(wcp.stage_cur_max && wcp.stage_cur_max.cur_max !== undefined
+            ? wcp.stage_cur_max : null);
+          const wqt = fresh(wcp.qc_target && wcp.qc_target.fcc !== undefined
+            ? wcp.qc_target : null);
+          const stageTarget = wst && Number.isFinite(Number(wst.delta))
+            ? Math.max(0, Number(wst.cur_max) - Number(wst.delta)) : null;
           // 按分压比选路径限制表；single/multi 拓扑未确认前不自动二选一
           const ratio = wcp.ratio;
           const divSingle = ratio === 4 ? "div4_single"
@@ -1055,10 +1064,14 @@ function renderVoters(d) {
               `Quick Charge 算法目标<b>${fmt(wd.cur_max, 0)}</b><small>quick_charge cur_max${age !== null ? " · " + age + "s前" : ""}</small></span>`);
           } else if (wst) {
             const age = curAge(wst);
-            summary.push(`<span class="chip" title="仅捕获到 mca_quick_charge_select_max_ibat 阶段行，等待最终调节值${wst.log_time ? " · 日志 " + esc(wst.log_time) : ""}">` +
-              `阶段算法目标<b>${fmt(wst.cur_max, 0)}</b><small>cur_stage${age !== null ? " · " + age + "s前" : ""} · 等待最终调节值</small></span>`);
+            summary.push(`<span class="chip" title="仅捕获到 mca_quick_charge_select_max_ibat 阶段行，使用 cur_max−delta_cur 作为阶段目标${wst.log_time ? " · 日志 " + esc(wst.log_time) : ""}">` +
+              `阶段算法目标<b>${fmt(stageTarget, 0)}</b><small>cur_stage${age !== null ? " · " + age + "s前" : ""} · cur_max−delta_cur</small></span>`);
+          } else if (wqt) {
+            const age = curAge(wqt);
+            summary.push(`<span class="chip" title="HVDCP/QC3 的 mca_qc_get_vbus_change_trend target_limit_fcc_ma；该值是 QC 调节目标，不冒充 Quick Charge Final${wqt.log_time ? " · 日志 " + esc(wqt.log_time) : ""}">` +
+              `QC 调节目标<b>${fmt(wqt.fcc, 0)}</b><small>target_limit_fcc_ma${age !== null ? " · " + age + "s前" : ""}</small></span>`);
           } else {
-            summary.push(`<span class="chip" title="有线 CP 已确认，但尚未捕获 quick_charge cur_max">Quick Charge 算法目标<b>--</b><small>待刷新</small></span>`);
+            summary.push(`<span class="chip" title="有线 CP 已确认，但当前会话尚未捕获 Quick Charge Final、阶段目标或 QC 调节目标">Quick Charge/QC 目标<b>--</b><small>待捕获</small></span>`);
           }
           // CP 路径限制：single/multi 同值视为共同上限，异值并列展示并标拓扑待确认
           const pushLim = (lim, topic, extra) => {
@@ -1077,15 +1090,18 @@ function renderVoters(d) {
             pushLim(limSingle || limMulti, (limSingle ? divSingle : divMulti));
           }
           // 综合有效上限：仅当路径限制可确定（单一表，或双表同值）时才推算 min
-          const rawTarget = wd ? wd.cur_max : (wst ? wst.cur_max : null);
+          const rawTarget = wd ? Number(wd.cur_max)
+            : stageTarget !== null ? stageTarget
+            : wqt ? Number(wqt.fcc) : null;
           const knownLim = limSingle && limMulti
             ? (limSingle.value === limMulti.value ? limSingle : null)
             : (limSingle || limMulti);
           if (rawTarget !== null && knownLim) {
             const eff = Math.min(rawTarget, knownLim.value);
             const capped = knownLim.value < rawTarget;
-            summary.push(`<span class="chip" title="min(quick_charge cur_max ${rawTarget}mA, ${knownLim.value}mA) = ${eff}mA（推算，非驱动直接输出）">` +
-              `综合有效上限<b>${fmt(eff, 0)}</b><small>推算${capped ? " · 受路径限制约束" : " · cur_max 主导"}</small></span>`);
+            const targetName = wd ? "Quick Charge Final" : wst ? "阶段目标" : "QC 调节目标";
+            summary.push(`<span class="chip" title="min(${targetName} ${rawTarget}mA, ${knownLim.value}mA) = ${eff}mA（推算，非驱动直接输出）">` +
+              `综合有效上限<b>${fmt(eff, 0)}</b><small>推算${capped ? " · 受路径限制约束" : " · 算法目标主导"}</small></span>`);
           } else if (rawTarget !== null && limSingle && limMulti && limSingle.value !== limMulti.value) {
             summary.push(`<span class="chip" title="single/multi 两张表值不同，无法确定当前生效路径限制，不做推算">综合有效上限<b>--</b><small>single/multi 拓扑待确认</small></span>`);
           } else if (rawTarget !== null && !divSingle) {

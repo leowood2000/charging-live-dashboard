@@ -4,6 +4,8 @@
 
 ## 功能特性
 
+- **有线 HVDCP/QC3 目标兼容**：当前会话若没有 `mca_quick_charge_select_max_ibat` 的 Quick Charge Final，解析 `mca_qc_get_vbus_change_trend` 的 `target_limit_fcc_ma` 并标为“QC 调节目标”；该值仍与当前 div 热控票取证，不冒充 Quick Charge Final。
+
 - **自适应双周期采集**：充电时快速采集 3 秒，未充电时 12 秒，页面超过 30 秒无访问时 45 秒；日志采集 10 秒（断开时 60 秒），避免后台持续唤醒手机或每 3 秒重扫几 MB 日志
 - **电流符号统一**：充电为正、放电为负，`Not charging` 也按放电处理；电池功率保留正负号；原始 JSON 仍保留内核原值方便排查
 - **MCA 仲裁移植**：支持 `voting on/off`、完整 client 字符集、单位白名单（未知主题不默认 mA）、`VOTE_POLICIES`（大部分来自 .ko 反汇编核实；`buck_charge_curr` 为项目假设 `MIN_ASSUMED`，仅详情卡“参考推算”）、按主题缓存 `changed`/`result`
