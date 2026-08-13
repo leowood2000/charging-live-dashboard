@@ -1,10 +1,21 @@
 import unittest
 
 from server import (Sampler, WIRED_VOTER_TOPICS, clear_vote_topics,
-                    merge_vote_topics, parse_vote_blocks, resolve_wired_input_source)
+                    merge_vote_topics, parse_session_cp_state, parse_vote_blocks,
+                    resolve_wired_input_source)
 
 
 class WiredInputSourceTests(unittest.TestCase):
+    def test_hvdcp_qc3_target_is_wired_cp_limit_candidate(self):
+        text = """[00:33:24:000-I] usb online: 1
+[00:33:24:448-I][mca_quick_charge]mca_qc_get_vbus_change_trend:1686 target_limit_fcc_ma: 5000, target_limit_ibus_ma:2500
+"""
+        state = parse_session_cp_state(text, fname="mca_log_20260813_003300")
+        wired = state["wired"]
+        self.assertEqual("cp", wired[0])
+        self.assertEqual(5000, wired[7]["fcc"])
+        self.assertEqual(2500, wired[7]["ibus"])
+
     def test_vote_topic_survives_partial_log_window(self):
         previous = {
             "wireless_buck_input": {

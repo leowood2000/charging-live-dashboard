@@ -12,7 +12,12 @@
 - 任何匹配的断开事件都会将当前 parser 状态置空，后续电流设置不会追加到已结束会话。
 - 连续 `set chg current` 合并为一条首值→末值记录，单会话事件上限降为 40；会话对象带 `source` 字段。
 
-最后更新：2026-08-12，目标发布版本：v0.11.21。
+最后更新：2026-08-13，目标发布版本：v0.11.26。
+
+## v0.11.26 有线 HVDCP/QC3 调节目标
+
+- Web 与 Android 同步解析有线 HVDCP/QC3 日志中的 `target_limit_fcc_ma/target_limit_ibus_ma`。
+- `target_limit_fcc_ma` 只作为“QC 调节目标”候选；Quick Charge Final、阶段 `cur_max-delta_cur` 和 QC3 目标必须保持语义区分，不能把 `target_limit_ibus_ma` 或 `cv_min_current` 冒充电池侧 Final。
 
 ## v0.11.19 有线热控合并与共享 FCC 归属
 

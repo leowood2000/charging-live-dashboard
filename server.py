@@ -368,6 +368,7 @@ class AdbReader:
             "-e 'mca_quick_charge_regulation' "
             "-e 'mca_wireless_quick_charge_select_cur_work_mode' "
             "-e 'mca_wireless_quick_charge_select_max_ibat' "
+            "-e 'target_limit_fcc_ma' "
             "-e 'mca_quick_charge_select_max_ibat'"
         )
         try:
@@ -807,6 +808,8 @@ WIRED_STAGE_CUR_MAX_RE = re.compile(
 WIRED_FINAL_CUR_MAX_RE = re.compile(
     r"mca_quick_charge_select_max_ibat:.*cur_max (\d+) secure_cur (\d+) "
     r"channel_cur (\d+) thermal_cur (\d+)")
+WIRED_QC_TARGET_RE = re.compile(
+    r"target_limit_fcc_ma:\s*(\d+)\s*,\s*target_limit_ibus_ma:\s*(\d+)")
 
 
 def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
@@ -833,6 +836,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     d_ctx = False
     d_cur_max: dict | None = None
     d_stage_cur_max: dict | None = None
+    d_qc_target: dict | None = None
     seq = 0
     for line in text.splitlines():
         seq += 1
@@ -857,12 +861,14 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
             d_ctx = False
             d_cur_max = None
             d_stage_cur_max = None
+            d_qc_target = None
             continue
         # 上下文：无线 quickchg 与有线 quickchg 互斥
         if "mca_wireless_quick_charge_" in line:
             w_ctx = True
             d_ctx = False
-        if "mca_quick_charge_" in line or "strategy_quickchg_" in line:
+        if ("mca_quick_charge_" in line or "[mca_quick_charge]" in line
+                or "strategy_quickchg_" in line):
             d_ctx = True
             w_ctx = False
         # 有线 Buck 证据：buckchg 策略活动（无 CP 证据时据此判 Buck）
@@ -918,6 +924,19 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
             d_cur_cp = True
             d_cur_cp_seq = seq
             continue
+        mq = WIRED_QC_TARGET_RE.search(line)
+        if mq and d_ctx:
+            tm = VOTE_TIME_RE.search(line)
+            d_qc_target = {
+                "fcc": int(mq.group(1)),
+                "ibus": int(mq.group(2)),
+                "source": "mca_qc_get_vbus_change_trend",
+                "log_time": shift_log_time(tm.group(1), offset_minutes) if tm else "",
+                "at": int(time.time() * 1000),
+            }
+            d_cur_cp = True
+            d_cur_cp_seq = seq
+            continue
         if "mca_quick_charge_select_max_ibat:" in line and "cur_work_cp" in line:
             d_cur_cp = True
             d_cur_cp_seq = seq
@@ -961,7 +980,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     return {
         "wireless": (w_cp_mode, w_cp_work_mode, w_cp_work_mode_ms, w_decision, w_boundary),
         "wired": (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
-                  d_cur_max, d_stage_cur_max),
+                  d_cur_max, d_stage_cur_max, d_qc_target),
     }
 
 
@@ -1339,6 +1358,8 @@ class Sampler:
         # 有线 CP quick_charge cur_max：1611 最终行 / 1597 阶段行
         self.last_wired_cur_max: dict | None = None
         self.last_wired_stage_cur_max: dict | None = None
+        # HVDCP/QC3 target_limit_fcc_ma（只作为 QC 调节目标，不冒充 Quick Charge Final）
+        self.last_wired_qc_target: dict | None = None
         # 有线输入遥测缓存：CP 与 Buck 各留一份，按 wired_cp.state 选择来源
         self.last_wired_cp_tel: dict | None = None
         self.last_wired_buck_tel: dict | None = None
@@ -1361,6 +1382,7 @@ class Sampler:
         self.last_cur_decision_key: tuple | None = None
         self.last_wired_cur_max_key: tuple | None = None
         self.last_wired_stage_cur_max_key: tuple | None = None
+        self.last_wired_qc_target_key: tuple | None = None
 
     def start(self) -> None:
         threading.Thread(target=self.run_fast, name="sampler-fast", daemon=True).start()
@@ -1596,12 +1618,14 @@ class Sampler:
             (w_cp_mode, w_cp_work_mode, w_cp_work_mode_ms,
              w_decision, w_boundary) = state["wireless"]
             (d_state, d_cp_ratio, d_cur_cp, d_buck, d_boundary,
-             d_cur_max, d_stage_cur_max) = state["wired"]
+             d_cur_max, d_stage_cur_max, d_qc_target) = state["wired"]
             # 有线输入遥测：只解析最后一次会话边界之后的日志段；
             # 同一行（log_time/vbus/ibus）不刷新 at，避免旧值被伪装成刚刚采到；
             # 新会话/协议变化后尚无遥测时清空缓存并标记等待，页面回退 USB uevent
             if is_wired_disconnected(pp_log):
                 self.last_voters = clear_vote_topics(self.last_voters, WIRED_VOTER_TOPICS)
+                self.last_wired_qc_target = None
+                self.last_wired_qc_target_key = None
                 self.last_wired_cp_tel = None
                 self.last_wired_buck_tel = None
                 self.last_wired_tel_waiting = False
@@ -1682,8 +1706,10 @@ class Sampler:
                 self.last_wired_buck = d_buck
                 self.last_wired_cur_max = d_cur_max
                 self.last_wired_stage_cur_max = d_stage_cur_max
+                self.last_wired_qc_target = d_qc_target
                 self.last_wired_cur_max_key = None
                 self.last_wired_stage_cur_max_key = None
+                self.last_wired_qc_target_key = None
             else:
                 if d_state != "unknown":
                     self.last_wired_state = d_state
@@ -1705,6 +1731,12 @@ class Sampler:
                     if key != self.last_wired_stage_cur_max_key:
                         self.last_wired_stage_cur_max_key = key
                         self.last_wired_stage_cur_max = d_stage_cur_max
+                if d_qc_target is not None:
+                    key = (d_qc_target.get("log_time", ""),
+                           d_qc_target.get("fcc"), d_qc_target.get("ibus"))
+                    if key != self.last_wired_qc_target_key:
+                        self.last_wired_qc_target_key = key
+                        self.last_wired_qc_target = d_qc_target
 
         self.logs_updated_at = time.time() * 1000
         # 复制、合并日志缓存、发布在同一个锁内完成，避免旧快照覆盖新快照
@@ -1900,6 +1932,8 @@ class Sampler:
                         if self.last_wired_cur_max is not None else None),
             "stage_cur_max": (copy.deepcopy(self.last_wired_stage_cur_max)
                               if self.last_wired_stage_cur_max is not None else None),
+            "qc_target": (copy.deepcopy(self.last_wired_qc_target)
+                          if self.last_wired_qc_target is not None else None),
         }
         meta = core.setdefault("meta", {})
         meta.update({
