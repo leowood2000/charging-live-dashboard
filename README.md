@@ -38,7 +38,7 @@
 - 无线/有线 SC8581 状态彻底解耦：`power_good` 只重置无线 track，`usb online` / `real_type changed` 只重置有线 track；SC8581 operation mode 仅在对应 quickchg 上下文出现后写入对应 track
 - 有线 Buck 确认：当前有线会话出现 `mca_strategy_buckchg / strategy_buckchg` 活动且无 CP 证据时，路径判为“Buck 直充（有线）”；有线状态按时间顺序 + CP 证据优先（mode>0 / mode=0 后 cur_work_cp → CP，mode=0 或 buckchg → Buck，均无 → 待确认）
 - **仲裁展示分离**：总仲裁 = 无线平台输入 ICL（上游）+ 电池侧最终上限（按路径）；`rx_iout_limit`（RX 输出允许上限）与 `wls_debug iout`（实测 RX 输出）收进无线平台输入 ICL 详情卡，与上游策略 ICL 分层展示、互不覆盖
-- **会话档案**：以 `power_good_on` 建立会话，`power_good_off` 记入“充电板移除”事件；保留全部电流变化与 open path 事件；只保留最新 1 个会话、每个会话最多 100 条事件
+- **会话档案**：无线以 `power_good_on/off`、有线以 `usb online`/`real_type` 建立和结束会话；记录协议变化、CP 模式/分压比/阶段、Buck 并行启停、全部电流序列与 open path 事件；只保留最新 1 个会话、每个会话最多 100 条事件
 - **日志容错**：日志读取失败保留上次成功数据并标记 `logs_stale`；读取成功但 grep 无匹配不算失败
 - **ADB 自动重连**：每 5 秒节流重试 `adb connect` + `adb devices`，启动时未连接或中途掉线可自动恢复；指定 `--adb-host` 时优先使用该设备
 - **断开清理**：无线断开（最后的电源事件为 `power_good_off`）时清除旧 ICL 与 EPP，避免上一会话残留
