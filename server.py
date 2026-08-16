@@ -39,6 +39,8 @@ BATTERY_UEVENT = "/sys/class/power_supply/battery/uevent"
 USB_UEVENT = "/sys/class/power_supply/usb/uevent"
 MCA_LOG_DIR = "/data/vendor/bsplog/charge/charge_logger/mca_log"
 THERMAL_DUMP = "/data/vendor/thermal/thermal.dump"
+THERMAL_SCONFIG = "/sys/class/thermal/thermal_message/sconfig"
+THERMAL_SCREEN_STATE = "/sys/class/thermal/thermal_message/screen_state"
 
 # 投票日志是事件式输出：正常运行时只需读取上次偏移后的新增内容。
 # 长时间未运行或日志轮转后不追赶全部历史，直接回退到最新 2 MiB。
@@ -92,6 +94,50 @@ THERMAL_SCENES = {
     "XINGTIE-MONITOR-WIRELESS": "xingtie（星穹铁道）",
     "YUANSHEN-MONITOR-WIRELESS": "yuanshen（原神）",
 }
+
+# mi_thermald 解密后的 thermal-map.conf：sconfig 是配置索引，
+# 熄屏充电 thermal-chg-only.conf 不在 map 内，由 screen_state + Charging 判定。
+THERMAL_CONFIG_SCENES = {
+    0: "normal（日常）", 1: "huanji（幻迹）", 2: "abnormal（异常）",
+    3: "nightvideo（夜间录像）", 4: "dolbyvision（杜比视界）", 5: "phone（通话）",
+    6: "nolimits（无限制）", 7: "class0", 8: "youtube", 9: "arvr（AR/VR）",
+    10: "navigation（导航）", 11: "video（视频）", 12: "demo（演示）",
+    13: "sptm（SPTM）", 14: "videochat（视频通话）", 15: "camera（相机）",
+    16: "4k（4K 录像）", 17: "4k（4K 录像）", 18: "tgame（重度游戏）",
+    19: "mgame（中度游戏）", 20: "yuanshen（原神）", 25: "xingtie（星穹铁道）",
+    26: "highfps（高帧率）", 27: "charge（充电中）",
+    50: "per-normal（性能常规）", 52: "per-abnormal（性能异常）",
+    57: "per-class0（性能 Class0）", 58: "per-youtube（性能 YouTube）",
+    60: "per-navigation（性能导航）", 61: "per-video（性能视频）", 76: "highfps（高帧率）",
+    500: "hp-normal（高性能常规）", 501: "hp-mgame（高性能中度游戏）",
+    600: "hp-normal（高性能常规，折叠屏展开）", 601: "hp-mgame（高性能中度游戏，折叠屏展开）",
+    700: "cgame（连续游戏）", 701: "cclassvideo（连续视频）", 702: "comp（性能压测）",
+    708: "cvideo（连续视频）", 800: "cgame（连续游戏，折叠屏展开）",
+    801: "cclassvideo（连续视频，折叠屏展开）",
+}
+_THERMAL_BASE_SCENES = [
+    "normal（日常）", "huanji（幻迹）", "abnormal（异常）", "nightvideo（夜间录像）",
+    "dolbyvision（杜比视界）", "phone（通话）", "nolimits（无限制）", "class0", "youtube",
+    "arvr（AR/VR）", "navigation（导航）", "video（视频）", "demo（演示）", "sptm（SPTM）",
+    "videochat（视频通话）", "camera（相机）", "4k（4K 录像）", "4k（4K 录像）",
+    "tgame（重度游戏）", "mgame（中度游戏）", "yuanshen（原神）",
+]
+for _i, _name in enumerate(_THERMAL_BASE_SCENES):
+    THERMAL_CONFIG_SCENES.setdefault(100 + _i, _name + "（折叠屏展开）")
+    THERMAL_CONFIG_SCENES.setdefault(200 + _i, "iec-" + _name)
+    THERMAL_CONFIG_SCENES.setdefault(300 + _i, "iec-" + _name + "（折叠屏展开）")
+THERMAL_CONFIG_SCENES.update({
+    125: "xingtie（星穹铁道，折叠屏展开）", 126: "highfps（高帧率，折叠屏展开）",
+    150: "per-normal（性能常规，折叠屏展开）", 152: "per-abnormal（性能异常，折叠屏展开）",
+    157: "per-class0（性能 Class0，折叠屏展开）", 158: "per-youtube（性能 YouTube，折叠屏展开）",
+    160: "per-navigation（性能导航，折叠屏展开）", 161: "per-video（性能视频，折叠屏展开）",
+    250: "iec-per-normal（性能常规）", 252: "iec-per-abnormal（性能异常）",
+    257: "iec-per-class0（性能 Class0）", 258: "iec-per-youtube（性能 YouTube）",
+    260: "iec-per-navigation（性能导航）", 261: "iec-per-video（性能视频）",
+    350: "iec-per-normal（性能常规，折叠屏展开）", 352: "iec-per-abnormal（性能异常，折叠屏展开）",
+    357: "iec-per-class0（性能 Class0，折叠屏展开）", 358: "iec-per-youtube（性能 YouTube，折叠屏展开）",
+    360: "iec-per-navigation（性能导航，折叠屏展开）", 361: "iec-per-video（性能视频，折叠屏展开）",
+})
 
 
 # Every live node collected from the device.  group/label/unit/fmt 与安卓版
@@ -266,7 +312,10 @@ class AdbReader:
 
     def read_batch(self) -> dict[str, dict]:
         """Returns {node_id: {raw, ok, value}} for all NODES plus battery uevent."""
-        paths = [BASE_SYSFS + n["path"] for n in NODES] + [BATTERY_UEVENT, USB_UEVENT]
+        # sconfig/screen_state 与 sysfs/uevent 同一批读取，避免为 Web 场景判定
+        # 额外唤醒一次 adb；screen off + charging 可识别 mi_thermald 特殊 chg-only。
+        paths = [BASE_SYSFS + n["path"] for n in NODES] + [
+            BATTERY_UEVENT, USB_UEVENT, THERMAL_SCONFIG, THERMAL_SCREEN_STATE]
         if not self.available:
             return {}
         script = "; ".join(f"echo '###{i}'; cat '{p}'" for i, p in enumerate(paths))
@@ -488,10 +537,14 @@ class AdbReader:
         result: dict[str, dict] = {}
         for i, lines in blocks.items():
             if i == count - 1:
-                result["usb_uevent"] = {"raw": "\n".join(lines), "ok": bool(lines)}
+                result["thermal_screen_state"] = {"raw": "\n".join(lines), "ok": bool(lines)}
             elif i == count - 2:
+                result["thermal_sconfig"] = {"raw": "\n".join(lines), "ok": bool(lines)}
+            elif i == count - 3:
+                result["usb_uevent"] = {"raw": "\n".join(lines), "ok": bool(lines)}
+            elif i == count - 4:
                 result["battery_uevent"] = {"raw": "\n".join(lines), "ok": bool(lines)}
-            elif i < count - 2:
+            elif i < count - 4:
                 raw = "\n".join(lines).strip()
                 node = NODES[i]
                 result[node["id"]] = {"raw": raw, "value": raw, "ok": bool(raw)}
@@ -1225,9 +1278,21 @@ THERMAL_WIRELESS_RE = re.compile(
 THERMAL_TARGET_RE = re.compile(r"\[wireless_charge (\d+)\]")
 
 
-def parse_thermal_dump(text: str) -> dict:
-    """Parse mi_thermald live state: scene, virtual temp, wireless target."""
-    result: dict = {"scene": None, "virtual_temp": None, "target": None}
+def parse_thermal_dump(text: str, sconfig_raw: str = "",
+                       screen_state_raw: str = "", charging: bool = False) -> dict:
+    """Parse mi_thermald state, preferring sconfig/screen_state over rolling dump lines."""
+    result: dict = {
+        "scene": None, "virtual_temp": None, "target": None,
+        "scene_source": None, "sconfig": None, "screen_state": None,
+    }
+    try:
+        result["sconfig"] = int(str(sconfig_raw).strip())
+    except (TypeError, ValueError):
+        pass
+    try:
+        result["screen_state"] = int(str(screen_state_raw).strip())
+    except (TypeError, ValueError):
+        pass
     for line in text.splitlines():
         m = THERMAL_WIRELESS_RE.search(line)
         if not m:
@@ -1238,6 +1303,14 @@ def parse_thermal_dump(text: str) -> dict:
         t = THERMAL_TARGET_RE.search(line)
         if t:
             result["target"] = int(t.group(1))
+    if result["screen_state"] == 0 and charging:
+        result["scene"] = "chg-only（熄屏充电）"
+        result["scene_source"] = "screen_state+sconfig"
+    elif result["sconfig"] in THERMAL_CONFIG_SCENES:
+        result["scene"] = THERMAL_CONFIG_SCENES[result["sconfig"]]
+        result["scene_source"] = "sconfig"
+    elif result["scene"] is not None:
+        result["scene_source"] = "thermal.dump"
     return result
 
 
@@ -1594,7 +1667,13 @@ class Sampler:
         self._update_logs_active(parsed)
         parsed["mode"] = "live"
         parsed["connected"] = True
-        parsed["thermal"] = parse_thermal_dump(self.adb.read_thermal_dump())
+        parsed["thermal"] = parse_thermal_dump(
+            self.adb.read_thermal_dump(),
+            raw.get("thermal_sconfig", ""),
+            raw.get("thermal_screen_state", ""),
+            str(raw.get("battery", {}).get("status", {}).get("value", "")).strip().lower()
+            == "charging",
+        )
 
         with self.lock:
             sample = {
@@ -2140,7 +2219,13 @@ class Sampler:
             parsed = parse_uevent(batch["usb_uevent"]["raw"])
             for k in ("ONLINE", "TYPE", "VOLTAGE_NOW", "CURRENT_NOW"):
                 usb[k.lower()] = parsed.get(k, "")
-        return {"nodes": nodes, "battery": battery, "usb": usb}
+        return {
+            "nodes": nodes,
+            "battery": battery,
+            "usb": usb,
+            "thermal_sconfig": batch.get("thermal_sconfig", {}).get("raw", ""),
+            "thermal_screen_state": batch.get("thermal_screen_state", {}).get("raw", ""),
+        }
 
     def _build(self, raw: dict) -> dict:
         nodes = raw["nodes"]

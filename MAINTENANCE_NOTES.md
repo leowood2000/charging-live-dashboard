@@ -1,5 +1,10 @@
 # 维护与跨会话交接说明
 
+## v0.11.30 mi_thermald 场景直读
+
+- Web 快速采集同批读取 `sconfig`/`screen_state`；场景优先使用 `thermal-map.conf` 索引，熄屏且 Charging 时使用特殊 `chg-only（熄屏充电）`。
+- `thermal.dump` 继续只负责虚拟温度/无线热控目标；`scene_source` 明确记录证据来源。Android 前后台约束不变：后台/锁屏停止 root 采集，Web 可持续记录熄屏期间场景。
+
 ## v0.11.21 四路功率路径隔离
 
 - 有线/无线 × CP/Buck 四路分别过滤当前限制与详情票，CP 不再显示任何 Buck ICL/FCC。
