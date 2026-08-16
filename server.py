@@ -39,6 +39,14 @@ BATTERY_UEVENT = "/sys/class/power_supply/battery/uevent"
 USB_UEVENT = "/sys/class/power_supply/usb/uevent"
 MCA_LOG_DIR = "/data/vendor/bsplog/charge/charge_logger/mca_log"
 THERMAL_DUMP = "/data/vendor/thermal/thermal.dump"
+THERMAL_SCONFIG = "/sys/class/thermal/thermal_message/sconfig"
+THERMAL_SCREEN_STATE = "/sys/class/thermal/thermal_message/screen_state"
+
+# 投票日志是事件式输出：正常运行时只需读取上次偏移后的新增内容。
+# 长时间未运行或日志轮转后不追赶全部历史，直接回退到最新 2 MiB。
+VOTE_INCREMENT_MAX_BYTES = 256 * 1024
+VOTE_OVERLAP_BYTES = 64 * 1024
+VOTE_FALLBACK_BYTES = 2 * 1024 * 1024
 
 
 def _detect_version() -> str:
@@ -86,6 +94,50 @@ THERMAL_SCENES = {
     "XINGTIE-MONITOR-WIRELESS": "xingtie（星穹铁道）",
     "YUANSHEN-MONITOR-WIRELESS": "yuanshen（原神）",
 }
+
+# mi_thermald 解密后的 thermal-map.conf：sconfig 是配置索引，
+# 熄屏充电 thermal-chg-only.conf 不在 map 内，由 screen_state + Charging 判定。
+THERMAL_CONFIG_SCENES = {
+    0: "normal（日常）", 1: "huanji（幻迹）", 2: "abnormal（异常）",
+    3: "nightvideo（夜间录像）", 4: "dolbyvision（杜比视界）", 5: "phone（通话）",
+    6: "nolimits（无限制）", 7: "class0", 8: "youtube", 9: "arvr（AR/VR）",
+    10: "navigation（导航）", 11: "video（视频）", 12: "demo（演示）",
+    13: "sptm（SPTM）", 14: "videochat（视频通话）", 15: "camera（相机）",
+    16: "4k（4K 录像）", 17: "4k（4K 录像）", 18: "tgame（重度游戏）",
+    19: "mgame（中度游戏）", 20: "yuanshen（原神）", 25: "xingtie（星穹铁道）",
+    26: "highfps（高帧率）", 27: "charge（充电中）",
+    50: "per-normal（性能常规）", 52: "per-abnormal（性能异常）",
+    57: "per-class0（性能 Class0）", 58: "per-youtube（性能 YouTube）",
+    60: "per-navigation（性能导航）", 61: "per-video（性能视频）", 76: "highfps（高帧率）",
+    500: "hp-normal（高性能常规）", 501: "hp-mgame（高性能中度游戏）",
+    600: "hp-normal（高性能常规，折叠屏展开）", 601: "hp-mgame（高性能中度游戏，折叠屏展开）",
+    700: "cgame（连续游戏）", 701: "cclassvideo（连续视频）", 702: "comp（性能压测）",
+    708: "cvideo（连续视频）", 800: "cgame（连续游戏，折叠屏展开）",
+    801: "cclassvideo（连续视频，折叠屏展开）",
+}
+_THERMAL_BASE_SCENES = [
+    "normal（日常）", "huanji（幻迹）", "abnormal（异常）", "nightvideo（夜间录像）",
+    "dolbyvision（杜比视界）", "phone（通话）", "nolimits（无限制）", "class0", "youtube",
+    "arvr（AR/VR）", "navigation（导航）", "video（视频）", "demo（演示）", "sptm（SPTM）",
+    "videochat（视频通话）", "camera（相机）", "4k（4K 录像）", "4k（4K 录像）",
+    "tgame（重度游戏）", "mgame（中度游戏）", "yuanshen（原神）",
+]
+for _i, _name in enumerate(_THERMAL_BASE_SCENES):
+    THERMAL_CONFIG_SCENES.setdefault(100 + _i, _name + "（折叠屏展开）")
+    THERMAL_CONFIG_SCENES.setdefault(200 + _i, "iec-" + _name)
+    THERMAL_CONFIG_SCENES.setdefault(300 + _i, "iec-" + _name + "（折叠屏展开）")
+THERMAL_CONFIG_SCENES.update({
+    125: "xingtie（星穹铁道，折叠屏展开）", 126: "highfps（高帧率，折叠屏展开）",
+    150: "per-normal（性能常规，折叠屏展开）", 152: "per-abnormal（性能异常，折叠屏展开）",
+    157: "per-class0（性能 Class0，折叠屏展开）", 158: "per-youtube（性能 YouTube，折叠屏展开）",
+    160: "per-navigation（性能导航，折叠屏展开）", 161: "per-video（性能视频，折叠屏展开）",
+    250: "iec-per-normal（性能常规）", 252: "iec-per-abnormal（性能异常）",
+    257: "iec-per-class0（性能 Class0）", 258: "iec-per-youtube（性能 YouTube）",
+    260: "iec-per-navigation（性能导航）", 261: "iec-per-video（性能视频）",
+    350: "iec-per-normal（性能常规，折叠屏展开）", 352: "iec-per-abnormal（性能异常，折叠屏展开）",
+    357: "iec-per-class0（性能 Class0，折叠屏展开）", 358: "iec-per-youtube（性能 YouTube，折叠屏展开）",
+    360: "iec-per-navigation（性能导航，折叠屏展开）", 361: "iec-per-video（性能视频，折叠屏展开）",
+})
 
 
 # Every live node collected from the device.  group/label/unit/fmt 与安卓版
@@ -168,6 +220,12 @@ class AdbReader:
         self.last_error = ""
         self.last_reconnect_at = time.monotonic()
         self.utc_offset_minutes = 0
+        # Vote tables are emitted on changes, not continuously. Keep a bounded
+        # cursor while the process is active; never catch up an unbounded gap
+        # after a long period without the dashboard.
+        self.vote_file = ""
+        self.vote_offset = 0
+        self.vote_cursor_ready = False
         self._init()
         if self.available:
             self.utc_offset_minutes = self._get_utc_offset()
@@ -254,7 +312,10 @@ class AdbReader:
 
     def read_batch(self) -> dict[str, dict]:
         """Returns {node_id: {raw, ok, value}} for all NODES plus battery uevent."""
-        paths = [BASE_SYSFS + n["path"] for n in NODES] + [BATTERY_UEVENT, USB_UEVENT]
+        # sconfig/screen_state 与 sysfs/uevent 同一批读取，避免为 Web 场景判定
+        # 额外唤醒一次 adb；screen off + charging 可识别 mi_thermald 特殊 chg-only。
+        paths = [BASE_SYSFS + n["path"] for n in NODES] + [
+            BATTERY_UEVENT, USB_UEVENT, THERMAL_SCONFIG, THERMAL_SCREEN_STATE]
         if not self.available:
             return {}
         script = "; ".join(f"echo '###{i}'; cat '{p}'" for i, p in enumerate(paths))
@@ -281,30 +342,88 @@ class AdbReader:
             self.last_error = "adb executable not found in PATH"
             return {}
 
-    def read_vote_logs(self, tail_bytes: int = 2097152) -> tuple[bool, str]:
-        """Tail the newest mca_log, filtered to mca_vote lines.
+    def read_vote_logs(self, tail_bytes: int = VOTE_FALLBACK_BYTES,
+                       allow_older_fallback: bool = False) -> tuple[bool, str]:
+        """Read vote changes incrementally with a hard catch-up cap.
 
-        Returns (read_ok, text)：read_ok 表示 ADB/su/文件读取成功；
-        grep 无匹配（退出码 1）不算读取失败，text 可能为空。
+        Vote tables are event-driven. While the dashboard is active, read only
+        the bytes appended after the last cursor (with a small overlap so a
+        VOTER header split across reads is retained). If the app was inactive
+        for too long or the log rotated, discard the old gap and read at most
+        the newest 2 MiB. On a cold start with no cached voters, also include
+        one older-file tail in the same shell command; this is a rare recovery
+        path, not a per-poll scan.
         """
         if not self.available:
             return False, ""
         try:
-            code, out, _ = self._run(
-                ["shell", "su", "-c", f'"ls -t {MCA_LOG_DIR}/ | head -n 1"'], timeout=10)
-            if code != 0 or not out.strip():
+            # One shell round-trip obtains the newest file, size, and the
+            # bounded vote chunk. This avoids a separate stat/grep wakeup.
+            code, listing, _ = self._run(
+                ["shell", "su", "-c",
+                 f'"ls -t {MCA_LOG_DIR}/ | head -n 2"'], timeout=10)
+            if code != 0 or not listing.strip():
                 return False, ""
-            fname = out.strip().splitlines()[0]
-            if not re.fullmatch(r"[A-Za-z0-9_.\-]+", fname):
+            files = [f.strip() for f in listing.splitlines()
+                     if re.fullmatch(r"[A-Za-z0-9_.\-]+", f.strip())]
+            if not files:
                 return False, ""
-            self.last_log_fname = fname
+            fname = files[0]
+            older = files[1] if len(files) > 1 else ""
             path = f"{MCA_LOG_DIR}/{fname}"
-            code, out, _ = self._run(
-                ["shell", "su", "-c", f'"tail -c {tail_bytes} {path} | grep -a -F \'mca_vote\'"'],
-                timeout=15)
-            # grep 无匹配时退出码为 1，属于“读取成功但无内容”，不算失败
-            return (code in (0, 1), out if code in (0, 1) else "")
-        except FileNotFoundError:
+            # stat is available in toybox; wc is a safe fallback on older builds.
+            code, meta_out, _ = self._run(
+                ["shell", "su", "-c",
+                 f'"stat -c %s {path} 2>/dev/null || wc -c < {path}"'], timeout=10)
+            if code != 0:
+                return False, ""
+            size_match = re.search(r"(\d+)", meta_out)
+            if not size_match:
+                return False, ""
+            size = int(size_match.group(1))
+            same_file = self.vote_cursor_ready and self.vote_file == fname
+            delta = size - self.vote_offset if same_file else -1
+            incremental = same_file and 0 <= delta <= VOTE_INCREMENT_MAX_BYTES
+            if incremental:
+                start = max(0, self.vote_offset - VOTE_OVERLAP_BYTES)
+                count = max(0, size - start)
+                aligned = (start // 4096) * 4096
+                skip = aligned // 4096
+                prefix = start - aligned
+                chunk = (
+                    f"dd if={path} bs=4096 skip={skip} 2>/dev/null "
+                    f"| tail -c +{prefix + 1} | head -c {count}"
+                )
+                mode = "incremental"
+            else:
+                chunk = f"tail -c {int(tail_bytes)} {path}"
+                mode = "tail"
+            grep_chunk = f"{chunk} | grep -a -F 'mca_vote'"
+            script = ""
+            # Only a cold-start/empty-cache read gets one older-file recovery
+            # tail. Older data is emitted first and current data last so the
+            # parser's newest topic block wins deterministically.
+            if allow_older_fallback and older:
+                script += (
+                    f"echo __VOTE_OLDER__{older}; "
+                    f"tail -c {int(tail_bytes)} {MCA_LOG_DIR}/{older} "
+                    "| grep -a -F 'mca_vote'; "
+                )
+            script += (
+                f"echo '__VOTE_CURSOR__{fname}|{size}|{mode}'; "
+                f"{grep_chunk}; exit 0"
+            )
+            code, out, _ = self._run(["shell", "su", "-c", f'"{script}"'], timeout=20)
+            if code not in (0, 1):
+                return False, ""
+            # The cursor advances after a successful bounded read even when
+            # grep found no event lines; the next poll then reads only new data.
+            self.vote_file = fname
+            self.vote_offset = size
+            self.vote_cursor_ready = True
+            self.last_log_fname = fname
+            return True, out
+        except (FileNotFoundError, ValueError):
             return False, ""
 
     def read_session_logs(self, tail_bytes: int = 4194304, file_count: int = 2) -> tuple[bool, str]:
@@ -418,10 +537,14 @@ class AdbReader:
         result: dict[str, dict] = {}
         for i, lines in blocks.items():
             if i == count - 1:
-                result["usb_uevent"] = {"raw": "\n".join(lines), "ok": bool(lines)}
+                result["thermal_screen_state"] = {"raw": "\n".join(lines), "ok": bool(lines)}
             elif i == count - 2:
+                result["thermal_sconfig"] = {"raw": "\n".join(lines), "ok": bool(lines)}
+            elif i == count - 3:
+                result["usb_uevent"] = {"raw": "\n".join(lines), "ok": bool(lines)}
+            elif i == count - 4:
                 result["battery_uevent"] = {"raw": "\n".join(lines), "ok": bool(lines)}
-            elif i < count - 2:
+            elif i < count - 4:
                 raw = "\n".join(lines).strip()
                 node = NODES[i]
                 result[node["id"]] = {"raw": raw, "value": raw, "ok": bool(raw)}
@@ -819,7 +942,8 @@ WIRED_QC_TARGET_RE = re.compile(
 def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     """无线/有线 CP 状态彻底解耦：
     - power_good 只重置无线 track；usb online / real_type changed 只重置有线 track
-    - SC8581 operation mode 只有在对应 quickchg 上下文出现后才写入对应 track
+    - SC8581 operation mode 按最近的 power_good/USB 边界归属；无线
+      cp_sc8581 行本身没有 quick-wireless 前缀，不能因为缺少上下文而丢掉 work_mode
     """
     # 无线 track（power_good 边界）
     w_cp_mode: int | None = None
@@ -842,9 +966,11 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     d_stage_cur_max: dict | None = None
     d_qc_target: dict | None = None
     seq = 0
+    last_boundary = ""
     for line in text.splitlines():
         seq += 1
         if "power_good_on" in line or "power_good_off" in line:
+            last_boundary = "wireless"
             w_boundary = True
             w_cp_mode = None
             w_cp_work_mode = None
@@ -855,6 +981,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
             continue
         if ("usb online: 0" in line or "usb online: 1" in line
                 or "real_type changed:" in line):
+            last_boundary = "wired"
             d_boundary = True
             d_cp_mode = None
             d_cp_mode_seq = -1
@@ -886,6 +1013,27 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
             if d_ctx:
                 d_cp_mode = n
                 d_cp_mode_seq = seq
+            # cp_sc8581 的 operation_mode 行通常只有硬件模块前缀，
+            # 不带 mca_wireless_quick_charge/mca_quick_charge 上下文。
+            # 最近物理边界才是可靠归属；无线行同时携带 work_mode=1/2/4，
+            # 直接保存它，避免首页只显示“CP”而没有分压比。
+            if ("sc8581_set_operation_mode" in line
+                    and not w_ctx and not d_ctx):
+                op_work = re.search(r"work_mode\s+(\d+)", line)
+                if last_boundary == "wireless":
+                    w_cp_mode = n
+                    if op_work:
+                        w_cp_work_mode = int(op_work.group(1))
+                        tm = VOTE_TIME_RE.search(line)
+                        raw = tm.group(1) if tm else ""
+                        w_cp_work_mode_ms = (
+                            abs_log_ms(fname, shift_log_time(raw, offset_minutes))
+                            if raw else None)
+                elif last_boundary == "wired":
+                    d_cp_mode = n
+                    d_cp_mode_seq = seq
+                    if op_work and int(op_work.group(1)) in (1, 2, 4):
+                        d_cp_ratio = int(op_work.group(1))
             continue
         m = re.search(r"mca_wireless_quick_charge_select_cur_work_mode:.*work_mode=(\d+)", line)
         if m:
@@ -1155,9 +1303,21 @@ THERMAL_WIRELESS_RE = re.compile(
 THERMAL_TARGET_RE = re.compile(r"\[wireless_charge (\d+)\]")
 
 
-def parse_thermal_dump(text: str) -> dict:
-    """Parse mi_thermald live state: scene, virtual temp, wireless target."""
-    result: dict = {"scene": None, "virtual_temp": None, "target": None}
+def parse_thermal_dump(text: str, sconfig_raw: str = "",
+                       screen_state_raw: str = "", charging: bool = False) -> dict:
+    """Parse mi_thermald state, preferring sconfig/screen_state over rolling dump lines."""
+    result: dict = {
+        "scene": None, "virtual_temp": None, "target": None,
+        "scene_source": None, "sconfig": None, "screen_state": None,
+    }
+    try:
+        result["sconfig"] = int(str(sconfig_raw).strip())
+    except (TypeError, ValueError):
+        pass
+    try:
+        result["screen_state"] = int(str(screen_state_raw).strip())
+    except (TypeError, ValueError):
+        pass
     for line in text.splitlines():
         m = THERMAL_WIRELESS_RE.search(line)
         if not m:
@@ -1168,6 +1328,14 @@ def parse_thermal_dump(text: str) -> dict:
         t = THERMAL_TARGET_RE.search(line)
         if t:
             result["target"] = int(t.group(1))
+    if result["screen_state"] == 0 and charging:
+        result["scene"] = "chg-only（熄屏充电）"
+        result["scene_source"] = "screen_state+sconfig"
+    elif result["sconfig"] in THERMAL_CONFIG_SCENES:
+        result["scene"] = THERMAL_CONFIG_SCENES[result["sconfig"]]
+        result["scene_source"] = "sconfig"
+    elif result["scene"] is not None:
+        result["scene_source"] = "thermal.dump"
     return result
 
 
@@ -1400,6 +1568,7 @@ class Sampler:
         # 有线功率路径状态：cp / buck / unknown（时间顺序 + CP 证据优先）
         self.last_wired_state: str = "unknown"
         self.last_wired_cp_ratio: int | None = None
+        self.last_wired_session_ms: int = 0
         self.last_wired_cur_cp: bool = False
         self.last_wired_buck: bool = False
         # 有线 CP quick_charge cur_max：1611 最终行 / 1597 阶段行
@@ -1523,7 +1692,13 @@ class Sampler:
         self._update_logs_active(parsed)
         parsed["mode"] = "live"
         parsed["connected"] = True
-        parsed["thermal"] = parse_thermal_dump(self.adb.read_thermal_dump())
+        parsed["thermal"] = parse_thermal_dump(
+            self.adb.read_thermal_dump(),
+            raw.get("thermal_sconfig", ""),
+            raw.get("thermal_screen_state", ""),
+            str(raw.get("battery", {}).get("status", {}).get("value", "")).strip().lower()
+            == "charging",
+        )
 
         with self.lock:
             sample = {
@@ -1549,7 +1724,10 @@ class Sampler:
     def collect_logs(self) -> None:
         if not self.adb.ensure_connected():
             return
-        vote_read_ok, vote_log = self.adb.read_vote_logs()
+        # Only an empty in-memory voter cache gets the one-shot older-file
+        # recovery. Normal polls use the bounded cursor path only.
+        vote_read_ok, vote_log = self.adb.read_vote_logs(
+            allow_older_fallback=not bool(self.last_voters))
         session_read_ok, session_log = self.adb.read_session_logs()
         pp_read_ok, pp_log = self.adb.read_power_path_logs()
         # 三条通道独立 stale：功率路径失败不再拖累 session/vote 主链路
@@ -1874,6 +2052,13 @@ class Sampler:
             "rx_iout_limit_stale": bool(getattr(self, "session_logs_stale", False)),
             "smartendura_soc_limit": bool(getattr(self, "last_smartendura_soc_limit", False)),
         }
+        if getattr(self, "last_wls_icl", None) is not None:
+            path.update({
+                "wireless_icl": self.last_wls_icl,
+                "wireless_icl_time": getattr(self, "last_wls_icl_log_time", "") or "",
+                "wireless_icl_at": getattr(self, "last_wls_icl_at", None) or 0,
+                "wireless_icl_ms": getattr(self, "last_wls_icl_ms", None) or 0,
+            })
         if isinstance(cp_ibus, (int, float)) and live_wireless:
             path["cp_ibus_total_ma"] = cp_ibus
         if getattr(self, "last_wls_work_mode_ms", None) is not None:
@@ -1975,6 +2160,7 @@ class Sampler:
             "ratio": self.last_wired_cp_ratio if wstate == "cp" else None,
             "active": wstate == "cp",
             "cur_work_cp": bool(self.last_wired_cur_cp),
+            "session_at": self.last_wired_session_ms or 0,
             "cur_max": (copy.deepcopy(self.last_wired_cur_max)
                         if self.last_wired_cur_max is not None else None),
             "stage_cur_max": (copy.deepcopy(self.last_wired_stage_cur_max)
@@ -2058,7 +2244,13 @@ class Sampler:
             parsed = parse_uevent(batch["usb_uevent"]["raw"])
             for k in ("ONLINE", "TYPE", "VOLTAGE_NOW", "CURRENT_NOW"):
                 usb[k.lower()] = parsed.get(k, "")
-        return {"nodes": nodes, "battery": battery, "usb": usb}
+        return {
+            "nodes": nodes,
+            "battery": battery,
+            "usb": usb,
+            "thermal_sconfig": batch.get("thermal_sconfig", {}).get("raw", ""),
+            "thermal_screen_state": batch.get("thermal_screen_state", {}).get("raw", ""),
+        }
 
     def _build(self, raw: dict) -> dict:
         nodes = raw["nodes"]

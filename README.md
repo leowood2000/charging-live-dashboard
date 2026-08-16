@@ -2,6 +2,23 @@
 
 单页仪表盘 + Python 标准库后端：通过 ADB root 读取 Redmi K80 Pro（miro）MCA 无线私有快充的所有充电实时数据，整合到一页展示。数据语义与安卓版 `SnapshotCollector.java` 完全对齐——本仓库是“安卓版仪表盘的 ADB 后端版本”，而不是另一套实现。
 
+## v0.11.31 CP 比例解析修复
+
+- 识别没有 `mca_*quick_charge` 前缀的 `sc8581_set_operation_mode` 日志，并按最近的 USB / 无线物理边界归属。
+- 从同一行 `work_mode` 保留有线或无线 CP 的 1:1、2:1、4:1 比例，避免路径卡只显示“CP”。
+
+## v0.11.30 mi_thermald 场景直读
+
+- 快速采集在同一批 ADB 读取中加入 `sconfig` 与 `screen_state`，场景优先采用 `thermal-map.conf` 的实际配置索引。
+- Web 在手机熄屏但仍充电时识别并记录 `chg-only（熄屏充电）`；`thermal.dump` 仍负责虚拟温度和无线热控目标，避免用滚动日志行猜场景。
+- `/api/data.thermal` 增加 `sconfig`、`screen_state`、`scene_source` 字段，便于核对场景切换证据。
+
+## v0.11.29 投票日志增量读取与空窗口回退
+
+- mca_vote 前台按文件偏移增量读取，单次最多补读 256KiB；长时间未运行、日志轮转或进程重启时最多回退最新 2MiB，不会因历史日志增长而追赶无限内容。
+- 首次打开或轮转边界没有投票行时，当前限制使用实时/会话派生路径和限制值，并明确标注投票日志待刷新，不再短暂显示空白限制卡。
+- 无线旁路状态保留会话内 `wireless_icl`，与 RX 实测电流分层展示。
+
 ## 功能特性
 
 - **有线 CP 限制摘要收敛**：主卡只显示最终瓶颈（Quick Charge/QC 目标、当前 div 热控与 SIC-BAT 取最小值）；非瓶颈候选保留在详情提示，避免 `12,400mA` 与 `15,500mA` 同时被误读为两个执行上限。
