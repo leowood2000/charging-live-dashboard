@@ -2,6 +2,11 @@
 
 单页仪表盘 + Python 标准库后端：通过 ADB root 读取 Redmi K80 Pro（miro）MCA 无线私有快充的所有充电实时数据，整合到一页展示。数据语义与安卓版 `SnapshotCollector.java` 完全对齐——本仓库是“安卓版仪表盘的 ADB 后端版本”，而不是另一套实现。
 
+## v0.11.31 CP 比例解析修复
+
+- 识别没有 `mca_*quick_charge` 前缀的 `sc8581_set_operation_mode` 日志，并按最近的 USB / 无线物理边界归属。
+- 从同一行 `work_mode` 保留有线或无线 CP 的 1:1、2:1、4:1 比例，避免路径卡只显示“CP”。
+
 ## v0.11.30 mi_thermald 场景直读
 
 - 快速采集在同一批 ADB 读取中加入 `sconfig` 与 `screen_state`，场景优先采用 `thermal-map.conf` 的实际配置索引。

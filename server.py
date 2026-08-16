@@ -942,7 +942,8 @@ WIRED_QC_TARGET_RE = re.compile(
 def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     """无线/有线 CP 状态彻底解耦：
     - power_good 只重置无线 track；usb online / real_type changed 只重置有线 track
-    - SC8581 operation mode 只有在对应 quickchg 上下文出现后才写入对应 track
+    - SC8581 operation mode 按最近的 power_good/USB 边界归属；无线
+      cp_sc8581 行本身没有 quick-wireless 前缀，不能因为缺少上下文而丢掉 work_mode
     """
     # 无线 track（power_good 边界）
     w_cp_mode: int | None = None
@@ -965,9 +966,11 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
     d_stage_cur_max: dict | None = None
     d_qc_target: dict | None = None
     seq = 0
+    last_boundary = ""
     for line in text.splitlines():
         seq += 1
         if "power_good_on" in line or "power_good_off" in line:
+            last_boundary = "wireless"
             w_boundary = True
             w_cp_mode = None
             w_cp_work_mode = None
@@ -978,6 +981,7 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
             continue
         if ("usb online: 0" in line or "usb online: 1" in line
                 or "real_type changed:" in line):
+            last_boundary = "wired"
             d_boundary = True
             d_cp_mode = None
             d_cp_mode_seq = -1
@@ -1009,6 +1013,27 @@ def parse_session_cp_state(text: str, offset_minutes: int = 0, fname: str = ""):
             if d_ctx:
                 d_cp_mode = n
                 d_cp_mode_seq = seq
+            # cp_sc8581 的 operation_mode 行通常只有硬件模块前缀，
+            # 不带 mca_wireless_quick_charge/mca_quick_charge 上下文。
+            # 最近物理边界才是可靠归属；无线行同时携带 work_mode=1/2/4，
+            # 直接保存它，避免首页只显示“CP”而没有分压比。
+            if ("sc8581_set_operation_mode" in line
+                    and not w_ctx and not d_ctx):
+                op_work = re.search(r"work_mode\s+(\d+)", line)
+                if last_boundary == "wireless":
+                    w_cp_mode = n
+                    if op_work:
+                        w_cp_work_mode = int(op_work.group(1))
+                        tm = VOTE_TIME_RE.search(line)
+                        raw = tm.group(1) if tm else ""
+                        w_cp_work_mode_ms = (
+                            abs_log_ms(fname, shift_log_time(raw, offset_minutes))
+                            if raw else None)
+                elif last_boundary == "wired":
+                    d_cp_mode = n
+                    d_cp_mode_seq = seq
+                    if op_work and int(op_work.group(1)) in (1, 2, 4):
+                        d_cp_ratio = int(op_work.group(1))
             continue
         m = re.search(r"mca_wireless_quick_charge_select_cur_work_mode:.*work_mode=(\d+)", line)
         if m:
