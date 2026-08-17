@@ -1313,6 +1313,16 @@ function renderVoters(d) {
       } else if (!bypassPower) {
         summary.push(`<span class="chip" title="无线功率路径尚未确认，不拿 Buck 路径 FCC 冒充当前上限">当前电池充电电流上限<b>--</b><small>路径待确认</small></span>`);
       }
+      if (wCpState === "cp" && !bypassPower
+          && wirelessPath.rx_iout_limit_captured
+          && Number.isFinite(Number(wirelessPath.rx_iout_limit))) {
+        const rxLimitAge = wirelessPath.rx_iout_limit_at
+          ? Math.max(0, Math.round((Date.now() - wirelessPath.rx_iout_limit_at) / 1000))
+          : null;
+        const rxLimitStale = wirelessPath.rx_iout_limit_stale;
+        summary.push(`<span class="chip summary-primary" title="strategy_class_wireless_op_get_rx_iout_limit 输出的驱动策略层 RX 输出允许上限；与实际 RX 输出和无线平台输入 ICL 属于不同控制层${wirelessPath.rx_iout_limit_time ? " · 日志 " + esc(wirelessPath.rx_iout_limit_time) : ""}">` +
+          `RX 输出允许上限<b>${fmt(wirelessPath.rx_iout_limit, 0)}mA</b><small>driver${rxLimitAge !== null ? " · " + rxLimitAge + "s前" : ""}${rxLimitStale ? " · 暂时陈旧" : ""}</small></span>`);
+      }
       if (battMa !== null && battMa !== undefined) {
         summary.push(`<span class="chip" title="battery 实测电流（充电为正）">实际电池电流<b id="limitBattCurrent">${battMa > 0 ? "+" : ""}${fmt(battMa, 0)}mA</b><small>battery</small></span>`);
       }
@@ -1394,6 +1404,7 @@ function renderVoters(d) {
     if (/当前电池充电电流上限|电池充电上限|综合有效上限|Quick Charge 算法目标/.test(html)) return 10;
     if (/实际电池电流/.test(html)) return 20;
     if (/无线(?:平台)?输入 ICL|有线输入限流/.test(html)) return 30;
+    if (/RX 输出允许上限/.test(html)) return 35;
     if (/实际 RX 输出|实际输入电流/.test(html)) return 40;
     if (/温度与热控|无线热控上限/.test(html)) return 50;
     if (/当前热控场景/.test(html)) return 55;
